@@ -68,7 +68,10 @@ func TestChat(t *testing.T) {
 				},
 			}
 
-			got, err := client.Chat("What is the capital of France?")
+			messages := []Message{
+				{Role: "user", Content: "What is the capital of France?"},
+			}
+			got, err := client.Chat(messages)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Chat() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -144,7 +147,10 @@ func TestChat_HTTP(t *testing.T) {
 	defer server.Close()
 
 	client := NewLLMClient(server.URL, "qwen3:8b")
-	answer, err := client.Chat("What is the capital of France?")
+	messages := []Message{
+		{Role: "user", Content: "What is the capital of France?"},
+	}
+	answer, err := client.Chat(messages)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}

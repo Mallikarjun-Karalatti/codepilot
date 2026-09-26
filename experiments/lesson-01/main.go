@@ -45,7 +45,7 @@ func NewLLMClient(baseURL string, model string) *LLMClient {
 	}
 }
 
-func (client *LLMClient) Chat(prompt string) (string, error) {
+func (client *LLMClient) Chat(messages []Message) (string, error) {
 
 	httpClient := client.HTTPClient
 	if httpClient == nil {
@@ -53,13 +53,9 @@ func (client *LLMClient) Chat(prompt string) (string, error) {
 	}
 
 	requestBody := ChatRequest{
-		Model: client.Model,
-		Messages: []Message{
-			{Role: "user",
-				Content: prompt,
-			},
-		},
-		Stream: false,
+		Model:    client.Model,
+		Messages: messages,
+		Stream:   false,
 	}
 
 	data, err := json.Marshal(requestBody)
@@ -104,11 +100,37 @@ func (client *LLMClient) Chat(prompt string) (string, error) {
 func main() {
 	client := NewLLMClient("http://localhost:11434", "qwen3:8b")
 
-	answer, err := client.Chat("What is the capital of France?")
+	messages := []Message{
+		{
+			Role:    "user",
+			Content: "My name is Alex.",
+		},
+	}
+
+	answer, err := client.Chat(messages)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	fmt.Println("Answer:", answer)
+	fmt.Println("Assistant:", answer)
+
+	messages = append(messages,
+		Message{
+			Role:    "assistant",
+			Content: answer,
+		},
+		Message{
+			Role:    "user",
+			Content: "What is my name?",
+		},
+	)
+
+	answer, err = client.Chat(messages)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	fmt.Println("Assistant:", answer)
 }
