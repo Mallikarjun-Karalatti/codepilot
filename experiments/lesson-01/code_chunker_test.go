@@ -14,6 +14,16 @@ type codeChunkTestEmbedder struct {
 	calls      []string
 }
 
+type mapTokenCounter map[string]int
+
+func (counter mapTokenCounter) CountTokens(text string) (int, error) {
+	count, ok := counter[text]
+	if !ok {
+		return 0, fmt.Errorf("token count not configured for %q", text)
+	}
+	return count, nil
+}
+
 func (e *codeChunkTestEmbedder) Embed(text string) ([]float64, error) {
 	e.calls = append(e.calls, text)
 	embedding, ok := e.embeddings[text]
@@ -185,6 +195,12 @@ func TestContextBuilderBuild(t *testing.T) {
 			parent,
 			standalone,
 		},
+		Tokenizer: mapTokenCounter{
+			parent.Text:     2,
+			standalone.Text: 2,
+			method.Text:     3,
+		},
+		MaxTokens: 10,
 	}
 
 	results := []CodeSearchResult{
@@ -209,6 +225,29 @@ func TestContextBuilderBuild(t *testing.T) {
 	}
 }
 
+func TestContextBuilderBuildSkipsChunkAndContinues(t *testing.T) {
+	large := CodeChunk{ID: 1, Text: "large", Kind: ChunkKindFunction, Name: "Large"}
+	small := CodeChunk{ID: 2, Text: "small", Kind: ChunkKindFunction, Name: "Small"}
+	builder := &ContextBuilder{
+		Tokenizer: mapTokenCounter{
+			large.Text: 5,
+			small.Text: 2,
+		},
+		MaxTokens: 2,
+	}
+
+	got, err := builder.Build([]CodeSearchResult{
+		{Chunk: large, Score: 0.9},
+		{Chunk: small, Score: 0.8},
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(got) != 1 || got[0] != small {
+		t.Errorf("Build() = %+v, want only next fitting chunk %+v", got, small)
+	}
+}
+
 func TestContextBuilderBuildEmptyResults(t *testing.T) {
 	builder := &ContextBuilder{}
 
@@ -223,7 +262,7 @@ func TestContextBuilderBuildEmptyResults(t *testing.T) {
 
 func TestContextBuilderBuildMissingParent(t *testing.T) {
 	method := CodeChunk{ID: 2, ParentID: 1, Kind: ChunkKindMethod, Name: "GetUser"}
-	builder := &ContextBuilder{}
+	builder := &ContextBuilder{Tokenizer: mapTokenCounter{}, MaxTokens: 10}
 
 	if _, err := builder.Build([]CodeSearchResult{{Chunk: method}}); err == nil {
 		t.Fatal("Build() error = nil, want missing parent error")

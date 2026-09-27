@@ -158,6 +158,31 @@ func (client *LLMClient) Chat(messages []Message) (string, error) {
 }
 
 func (client *EmbeddingClient) Embed(text string) ([]float64, error) {
+	embedding, _, err := client.embed(text)
+	return embedding, err
+}
+
+// CountTokens returns the input token count reported by the configured local
+// embedding model. Ollama reports this alongside the embedding response.
+func (client *EmbeddingClient) CountTokens(text string) (int, error) {
+	if text == "" {
+		return 0, nil
+	}
+
+	_, tokenCount, err := client.embed(text)
+	if err != nil {
+		return 0, err
+	}
+	if tokenCount == nil {
+		return 0, fmt.Errorf("embedding response did not include prompt_eval_count")
+	}
+	if *tokenCount < 0 {
+		return 0, fmt.Errorf("embedding response returned invalid prompt_eval_count: %d", *tokenCount)
+	}
+	return *tokenCount, nil
+}
+
+func (client *EmbeddingClient) embed(text string) ([]float64, *int, error) {
 	httpClient := client.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -170,7 +195,7 @@ func (client *EmbeddingClient) Embed(text string) ([]float64, error) {
 
 	data, err := json.Marshal(requestBody)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	request, err := http.NewRequest(
@@ -179,39 +204,40 @@ func (client *EmbeddingClient) Embed(text string) ([]float64, error) {
 		bytes.NewBuffer(data),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer response.Body.Close()
 
 	if !(response.StatusCode >= 200 && response.StatusCode <= 299) {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"request failed with status code: %d",
 			response.StatusCode,
 		)
 	}
 
 	var embeddingResponse struct {
-		Embeddings [][]float64 `json:"embeddings"`
+		Embeddings      [][]float64 `json:"embeddings"`
+		PromptEvalCount *int        `json:"prompt_eval_count"`
 	}
 
 	err = json.NewDecoder(response.Body).Decode(&embeddingResponse)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if len(embeddingResponse.Embeddings) != 1 {
-		return nil, fmt.Errorf("expected exactly one embedding, got %d",
+		return nil, nil, fmt.Errorf("expected exactly one embedding, got %d",
 			len(embeddingResponse.Embeddings))
 	}
 
-	return embeddingResponse.Embeddings[0], nil
+	return embeddingResponse.Embeddings[0], embeddingResponse.PromptEvalCount, nil
 
 }
 
@@ -362,31 +388,79 @@ type CodeSearchResult struct {
 
 type ContextBuilder struct {
 	Documents []CodeChunk
+	Tokenizer TokenCounter
+	MaxTokens int
+}
+
+type TokenCounter interface {
+	CountTokens(text string) (int, error)
 }
 
 func (builder *ContextBuilder) Build(results []CodeSearchResult) ([]CodeChunk, error) {
+	if len(results) == 0 {
+		return []CodeChunk{}, nil
+	}
+	if builder.Tokenizer == nil {
+		return nil, fmt.Errorf("tokenizer must not be nil")
+	}
+	if builder.MaxTokens <= 0 {
+		return nil, fmt.Errorf("max tokens must be greater than 0")
+	}
+
 	documentsByID := make(map[int]CodeChunk, len(builder.Documents))
 	for _, document := range builder.Documents {
 		documentsByID[document.ID] = document
 	}
 
 	chunksByID := make(map[int]CodeChunk, len(results)*2)
+	tokenCounts := make(map[int]int, len(results)*2)
+	tokensUsed := 0
 	for _, result := range results {
 		chunk := result.Chunk
-		chunksByID[chunk.ID] = chunk
-
-		if chunk.ParentID == 0 {
+		if _, included := chunksByID[chunk.ID]; included {
 			continue
 		}
-		parent, ok := documentsByID[chunk.ParentID]
-		if !ok {
-			return nil, fmt.Errorf(
-				"parent chunk %d not found for chunk %d",
-				chunk.ParentID,
-				chunk.ID,
-			)
+
+		candidates := make([]CodeChunk, 0, 2)
+		if chunk.ParentID != 0 {
+			if _, parentIncluded := chunksByID[chunk.ParentID]; !parentIncluded {
+				parent, ok := documentsByID[chunk.ParentID]
+				if !ok {
+					return nil, fmt.Errorf(
+						"parent chunk %d not found for chunk %d",
+						chunk.ParentID,
+						chunk.ID,
+					)
+				}
+				candidates = append(candidates, parent)
+			}
 		}
-		chunksByID[parent.ID] = parent
+		candidates = append(candidates, chunk)
+
+		candidateTokens := 0
+		for _, candidate := range candidates {
+			tokens, cached := tokenCounts[candidate.ID]
+			if !cached {
+				var err error
+				tokens, err = builder.Tokenizer.CountTokens(candidate.Text)
+				if err != nil {
+					return nil, fmt.Errorf("count tokens for chunk %d: %w", candidate.ID, err)
+				}
+				if tokens < 0 {
+					return nil, fmt.Errorf("token counter returned negative count for chunk %d", candidate.ID)
+				}
+				tokenCounts[candidate.ID] = tokens
+			}
+			candidateTokens += tokens
+		}
+
+		if candidateTokens > builder.MaxTokens-tokensUsed {
+			continue
+		}
+		for _, candidate := range candidates {
+			chunksByID[candidate.ID] = candidate
+		}
+		tokensUsed += candidateTokens
 	}
 
 	chunks := make([]CodeChunk, 0, len(chunksByID))
