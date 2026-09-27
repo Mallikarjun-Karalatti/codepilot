@@ -360,6 +360,46 @@ type CodeSearchResult struct {
 	Score float64
 }
 
+type ContextBuilder struct {
+	Documents []CodeChunk
+}
+
+func (builder *ContextBuilder) Build(results []CodeSearchResult) ([]CodeChunk, error) {
+	documentsByID := make(map[int]CodeChunk, len(builder.Documents))
+	for _, document := range builder.Documents {
+		documentsByID[document.ID] = document
+	}
+
+	chunksByID := make(map[int]CodeChunk, len(results)*2)
+	for _, result := range results {
+		chunk := result.Chunk
+		chunksByID[chunk.ID] = chunk
+
+		if chunk.ParentID == 0 {
+			continue
+		}
+		parent, ok := documentsByID[chunk.ParentID]
+		if !ok {
+			return nil, fmt.Errorf(
+				"parent chunk %d not found for chunk %d",
+				chunk.ParentID,
+				chunk.ID,
+			)
+		}
+		chunksByID[parent.ID] = parent
+	}
+
+	chunks := make([]CodeChunk, 0, len(chunksByID))
+	for _, chunk := range chunksByID {
+		chunks = append(chunks, chunk)
+	}
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].ID < chunks[j].ID
+	})
+
+	return chunks, nil
+}
+
 func (engine *CodeSearchEngine) Add(chunks []CodeChunk) error {
 	if engine.Embedder == nil {
 		return fmt.Errorf("embedder must not be nil")

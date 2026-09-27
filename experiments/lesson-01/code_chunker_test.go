@@ -168,6 +168,68 @@ func TestCodeSearchEngineSearch(t *testing.T) {
 	})
 }
 
+func TestContextBuilderBuild(t *testing.T) {
+	parent := CodeChunk{ID: 1, Text: "type UserService struct{}", Kind: ChunkKindStruct, Name: "UserService"}
+	standalone := CodeChunk{ID: 2, Text: "func Health() {}", Kind: ChunkKindFunction, Name: "Health"}
+	method := CodeChunk{
+		ID:         3,
+		ParentID:   parent.ID,
+		Text:       "func (s *UserService) GetUser() {}",
+		Kind:       ChunkKindMethod,
+		Name:       "GetUser",
+		ParentName: parent.Name,
+	}
+	builder := &ContextBuilder{
+		Documents: []CodeChunk{
+			method,
+			parent,
+			standalone,
+		},
+	}
+
+	results := []CodeSearchResult{
+		{Chunk: method, Score: 0.9},
+		{Chunk: parent, Score: 0.85},
+		{Chunk: standalone, Score: 0.8},
+		{Chunk: method, Score: 0.7}, // duplicate result should not duplicate the chunk
+	}
+
+	got, err := builder.Build(results)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	want := []CodeChunk{parent, standalone, method}
+	if len(got) != len(want) {
+		t.Fatalf("Build() returned %d chunks, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chunk %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestContextBuilderBuildEmptyResults(t *testing.T) {
+	builder := &ContextBuilder{}
+
+	got, err := builder.Build(nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Build() returned %d chunks, want 0", len(got))
+	}
+}
+
+func TestContextBuilderBuildMissingParent(t *testing.T) {
+	method := CodeChunk{ID: 2, ParentID: 1, Kind: ChunkKindMethod, Name: "GetUser"}
+	builder := &ContextBuilder{}
+
+	if _, err := builder.Build([]CodeSearchResult{{Chunk: method}}); err == nil {
+		t.Fatal("Build() error = nil, want missing parent error")
+	}
+}
+
 func TestReceiverTypeName(t *testing.T) {
 	tests := []struct {
 		name    string
