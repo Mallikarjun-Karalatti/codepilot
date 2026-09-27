@@ -355,7 +355,7 @@ func TestCodeChunker(t *testing.T) {
 func Add(a int, b int) int {
     return a + b
 }`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -390,7 +390,7 @@ func Add(a int, b int) int {
 func Add(a, b int) int { return a + b }
 func Subtract(a, b int) int { return a - b }
 func Multiply(a, b int) int { return a * b }`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -419,7 +419,7 @@ type UserService struct{}
 func Add(a, b int) int { return a + b }
 func (s UserService) GetUser() {}
 func (s *UserService) SaveUser() {}`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -465,7 +465,7 @@ func (s *UserService) SaveUser() {}`
 func (u User) GetID() int { return u.ID }
 type User struct { ID int }
 func NewUser() User { return User{} }`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -490,7 +490,7 @@ type Service struct{}
 type Other struct{}
 
 func (s Service, o Other) Run() {}`
-		if _, err := chunker.Chunk(source); err == nil {
+		if _, err := chunker.Chunk("example.go", source); err == nil {
 			t.Fatal("Chunk() error = nil, want error for multiple receiver fields")
 		}
 	})
@@ -499,7 +499,7 @@ func (s Service, o Other) Run() {}`
 		source := `package example
 
 func (s *UnknownService) GetUser() {}`
-		if _, err := chunker.Chunk(source); err == nil {
+		if _, err := chunker.Chunk("example.go", source); err == nil {
 			t.Fatal("Chunk() error = nil, want error for unknown receiver")
 		}
 	})
@@ -510,7 +510,7 @@ func (s *UnknownService) GetUser() {}`
 type UserService struct {
     DB *Database
 }`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -548,7 +548,7 @@ type (
         URL string
     }
 )`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -604,7 +604,7 @@ type User struct { ID UserID }
 func NewUser() User { return User{} }
 func (u User) GetID() UserID { return u.ID }
 type Settings struct{}`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -644,7 +644,7 @@ type Settings struct{}`
 type UserID int
 type UserName = string
 type Handler func()`
-		chunks, err := chunker.Chunk(source)
+		chunks, err := chunker.Chunk("example.go", source)
 		if err != nil {
 			t.Fatalf("Chunk() error = %v", err)
 		}
@@ -654,9 +654,31 @@ type Handler func()`
 	})
 
 	t.Run("invalid Go returns error", func(t *testing.T) {
-		if _, err := chunker.Chunk("package main\n\nfunc Add( {\n"); err == nil {
+		if _, err := chunker.Chunk("invalid.go", "package main\n\nfunc Add( {\n"); err == nil {
 			t.Fatal("Chunk() error = nil, want parse error")
 		}
 	})
 
+}
+
+func TestCodeChunkerPreservesSourceFile(t *testing.T) {
+	source := `package main
+
+type User struct{}
+func Ping() {}
+func (u User) Get() {}`
+	const filename = "services/user.go"
+
+	chunks, err := (&CodeChunker{}).Chunk(filename, source)
+	if err != nil {
+		t.Fatalf("Chunk() error = %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("Chunk() returned %d chunks, want 3", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if chunk.SourceFile != filename {
+			t.Errorf("chunk %d SourceFile = %q, want %q", i, chunk.SourceFile, filename)
+		}
+	}
 }

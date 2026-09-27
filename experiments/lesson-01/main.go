@@ -356,6 +356,7 @@ type CodeChunk struct {
 	ID         int
 	ParentID   int
 	Text       string
+	SourceFile string
 	StartLine  int
 	EndLine    int
 	Kind       string
@@ -390,6 +391,28 @@ type ContextBuilder struct {
 	Documents []CodeChunk
 	Tokenizer TokenCounter
 	MaxTokens int
+}
+
+type ContextFormatter struct{}
+
+func (formatter *ContextFormatter) Format(chunks []CodeChunk) string {
+	if len(chunks) == 0 {
+		return ""
+	}
+
+	sections := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		lines := []string{
+			fmt.Sprintf("[%s: %s]", strings.ToUpper(chunk.Kind), chunk.Name),
+			fmt.Sprintf("Source: %s:%d-%d", chunk.SourceFile, chunk.StartLine, chunk.EndLine),
+		}
+		if chunk.ParentName != "" {
+			lines = append(lines, "Parent: "+chunk.ParentName)
+		}
+		lines = append(lines, chunk.Text)
+		sections[i] = strings.Join(lines, "\n")
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 type TokenCounter interface {
@@ -557,9 +580,9 @@ func receiverTypeName(field *ast.Field) (string, error) {
 	}
 }
 
-func (c *CodeChunker) Chunk(source string) ([]CodeChunk, error) {
+func (c *CodeChunker) Chunk(sourceFile string, source string) ([]CodeChunk, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "", source, 0)
+	file, err := parser.ParseFile(fset, sourceFile, source, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -598,11 +621,12 @@ func (c *CodeChunker) Chunk(source string) ([]CodeChunk, error) {
 			structChunks = append(structChunks, positionedChunk{
 				pos: startPos,
 				chunk: CodeChunk{
-					Text:      source[start:end],
-					StartLine: fset.Position(startPos).Line,
-					EndLine:   fset.Position(typeSpec.End()).Line,
-					Kind:      ChunkKindStruct,
-					Name:      typeSpec.Name.Name,
+					SourceFile: sourceFile,
+					Text:       source[start:end],
+					StartLine:  fset.Position(startPos).Line,
+					EndLine:    fset.Position(typeSpec.End()).Line,
+					Kind:       ChunkKindStruct,
+					Name:       typeSpec.Name.Name,
 				},
 			})
 		}
@@ -637,6 +661,7 @@ func (c *CodeChunker) Chunk(source string) ([]CodeChunk, error) {
 		functionChunks = append(functionChunks, positionedChunk{
 			pos: fn.Pos(),
 			chunk: CodeChunk{
+				SourceFile: sourceFile,
 				Text:       source[start:end],
 				StartLine:  fset.Position(fn.Pos()).Line,
 				EndLine:    fset.Position(fn.End()).Line,
