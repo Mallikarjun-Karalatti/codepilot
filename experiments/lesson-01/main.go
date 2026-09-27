@@ -345,6 +345,77 @@ const (
 
 type CodeChunker struct{}
 
+type CodeDocument struct {
+	Chunk     CodeChunk
+	Embedding []float64
+}
+
+type CodeSearchEngine struct {
+	Embedder  Embedder
+	Documents []CodeDocument
+}
+
+type CodeSearchResult struct {
+	Chunk CodeChunk
+	Score float64
+}
+
+func (engine *CodeSearchEngine) Add(chunks []CodeChunk) error {
+	if engine.Embedder == nil {
+		return fmt.Errorf("embedder must not be nil")
+	}
+
+	documents := make([]CodeDocument, len(chunks))
+	for i, chunk := range chunks {
+		embedding, err := engine.Embedder.Embed(chunk.Text)
+		if err != nil {
+			return fmt.Errorf("embed code chunk %d: %w", chunk.ID, err)
+		}
+		documents[i] = CodeDocument{
+			Chunk:     chunk,
+			Embedding: embedding,
+		}
+	}
+
+	engine.Documents = append(engine.Documents, documents...)
+	return nil
+}
+
+func (engine *CodeSearchEngine) Search(query string, limit int) ([]CodeSearchResult, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be greater than 0")
+	}
+	if engine.Embedder == nil {
+		return nil, fmt.Errorf("embedder must not be nil")
+	}
+
+	queryEmbedding, err := engine.Embedder.Embed(query)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]CodeSearchResult, 0, len(engine.Documents))
+	for _, document := range engine.Documents {
+		score, err := CosineSimilarity(queryEmbedding, document.Embedding)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, CodeSearchResult{
+			Chunk: document.Chunk,
+			Score: score,
+		})
+	}
+
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
 func receiverTypeName(field *ast.Field) (string, error) {
 	if field == nil || field.Type == nil {
 		return "", fmt.Errorf("receiver field and type must not be nil")

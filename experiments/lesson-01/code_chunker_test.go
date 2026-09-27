@@ -1,10 +1,172 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
+	"math"
+	"reflect"
 	"testing"
 )
+
+type codeChunkTestEmbedder struct {
+	embeddings map[string][]float64
+	calls      []string
+}
+
+func (e *codeChunkTestEmbedder) Embed(text string) ([]float64, error) {
+	e.calls = append(e.calls, text)
+	embedding, ok := e.embeddings[text]
+	if !ok {
+		return nil, fmt.Errorf("embedding not found for %q", text)
+	}
+	return embedding, nil
+}
+
+func TestCodeSearchEngineAdd(t *testing.T) {
+	chunks := []CodeChunk{
+		{ID: 1, Text: "func Add(a, b int) int { return a + b }", Kind: ChunkKindFunction, Name: "Add"},
+		{ID: 2, Text: "type User struct { ID int }", Kind: ChunkKindStruct, Name: "User"},
+	}
+	embedder := &codeChunkTestEmbedder{
+		embeddings: map[string][]float64{
+			chunks[0].Text: {0.1, 0.2},
+			chunks[1].Text: {0.3, 0.4},
+		},
+	}
+	engine := &CodeSearchEngine{Embedder: embedder}
+
+	if err := engine.Add(chunks); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if len(engine.Documents) != len(chunks) {
+		t.Fatalf("Documents length = %d, want %d", len(engine.Documents), len(chunks))
+	}
+	for i, chunk := range chunks {
+		document := engine.Documents[i]
+		if document.Chunk != chunk {
+			t.Errorf("document %d chunk = %+v, want %+v", i, document.Chunk, chunk)
+		}
+		wantEmbedding := embedder.embeddings[chunk.Text]
+		if len(document.Embedding) != len(wantEmbedding) {
+			t.Errorf("document %d embedding length = %d, want %d", i, len(document.Embedding), len(wantEmbedding))
+			continue
+		}
+		for j := range wantEmbedding {
+			if document.Embedding[j] != wantEmbedding[j] {
+				t.Errorf("document %d embedding[%d] = %v, want %v", i, j, document.Embedding[j], wantEmbedding[j])
+			}
+		}
+	}
+	if len(embedder.calls) != len(chunks) || embedder.calls[0] != chunks[0].Text || embedder.calls[1] != chunks[1].Text {
+		t.Errorf("Embed() calls = %q, want chunk texts in order", embedder.calls)
+	}
+}
+
+func TestCodeSearchEngineAddFailurePreservesDocuments(t *testing.T) {
+	firstChunk := CodeChunk{ID: 1, Text: "first chunk", Name: "First"}
+	failedChunk := CodeChunk{ID: 2, Text: "chunk with no embedding", Name: "Second"}
+	initialDocuments := []CodeDocument{{
+		Chunk:     CodeChunk{ID: 9, Text: "existing document", Name: "Existing"},
+		Embedding: []float64{0.7, 0.8},
+	}}
+	engine := &CodeSearchEngine{
+		Embedder: &codeChunkTestEmbedder{
+			embeddings: map[string][]float64{
+				firstChunk.Text: {0.1, 0.2},
+			},
+		},
+		Documents: append([]CodeDocument(nil), initialDocuments...),
+	}
+
+	err := engine.Add([]CodeChunk{firstChunk, failedChunk})
+	if err == nil {
+		t.Fatal("Add() error = nil, want embedding error")
+	}
+	if !reflect.DeepEqual(engine.Documents, initialDocuments) {
+		t.Errorf("Documents after failed Add() = %#v, want unchanged %#v", engine.Documents, initialDocuments)
+	}
+}
+
+func TestCodeSearchEngineSearch(t *testing.T) {
+	queryEmbedding := []float64{1, 0}
+	queryEmbedder := func() *codeChunkTestEmbedder {
+		return &codeChunkTestEmbedder{embeddings: map[string][]float64{"query": queryEmbedding}}
+	}
+
+	t.Run("sorts by descending similarity, respects limit, and preserves chunks", func(t *testing.T) {
+		lowChunk := CodeChunk{ID: 1, Text: "low", Kind: ChunkKindFunction, Name: "Low"}
+		highChunk := CodeChunk{ID: 2, Text: "high", Kind: ChunkKindMethod, Name: "High", ParentName: "Service", ParentID: 9}
+		middleChunk := CodeChunk{ID: 3, Text: "middle", Kind: ChunkKindStruct, Name: "Middle"}
+		engine := &CodeSearchEngine{
+			Embedder: queryEmbedder(),
+			Documents: []CodeDocument{
+				{Chunk: lowChunk, Embedding: []float64{0.6, 0.8}},
+				{Chunk: highChunk, Embedding: []float64{1, 0}},
+				{Chunk: middleChunk, Embedding: []float64{0.8, 0.6}},
+			},
+		}
+
+		results, err := engine.Search("query", 2)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("Search() returned %d results, want 2", len(results))
+		}
+		if results[0].Chunk != highChunk || math.Abs(results[0].Score-1) > 1e-9 {
+			t.Errorf("first result = %+v, want high chunk with score 1", results[0])
+		}
+		if results[1].Chunk != middleChunk || math.Abs(results[1].Score-0.8) > 1e-9 {
+			t.Errorf("second result = %+v, want middle chunk with score 0.8", results[1])
+		}
+	})
+
+	t.Run("invalid limit returns error", func(t *testing.T) {
+		engine := &CodeSearchEngine{Embedder: queryEmbedder()}
+		if _, err := engine.Search("query", 0); err == nil {
+			t.Fatal("Search() error = nil, want invalid limit error")
+		}
+	})
+
+	t.Run("nil embedder returns error", func(t *testing.T) {
+		engine := &CodeSearchEngine{}
+		if _, err := engine.Search("query", 1); err == nil {
+			t.Fatal("Search() error = nil, want nil embedder error")
+		}
+	})
+
+	t.Run("query embedding failure returns error", func(t *testing.T) {
+		engine := &CodeSearchEngine{Embedder: queryEmbedder()}
+		if _, err := engine.Search("unknown query", 1); err == nil {
+			t.Fatal("Search() error = nil, want query embedding error")
+		}
+	})
+
+	t.Run("embedding dimension mismatch returns error", func(t *testing.T) {
+		engine := &CodeSearchEngine{
+			Embedder: queryEmbedder(),
+			Documents: []CodeDocument{{
+				Chunk:     CodeChunk{ID: 1, Name: "Bad"},
+				Embedding: []float64{1, 0, 0},
+			}},
+		}
+		if _, err := engine.Search("query", 1); err == nil {
+			t.Fatal("Search() error = nil, want dimension mismatch error")
+		}
+	})
+
+	t.Run("empty document collection returns empty results", func(t *testing.T) {
+		engine := &CodeSearchEngine{Embedder: queryEmbedder()}
+		results, err := engine.Search("query", 1)
+		if err != nil {
+			t.Fatalf("Search() error = %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("Search() returned %d results, want 0", len(results))
+		}
+	})
+}
 
 func TestReceiverTypeName(t *testing.T) {
 	tests := []struct {
