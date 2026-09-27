@@ -415,6 +415,67 @@ func (formatter *ContextFormatter) Format(chunks []CodeChunk) string {
 	return strings.Join(sections, "\n\n")
 }
 
+type CodeAssistant struct {
+	SearchEngine   *CodeSearchEngine
+	ContextBuilder *ContextBuilder
+	Formatter      *ContextFormatter
+	LLM            *LLMClient
+}
+
+func buildPrompt(question, context string) string {
+	return fmt.Sprintf(
+		"Answer the question using the code context below. If the context does not contain the answer, say so.\n\nCode context:\n%s\n\nQuestion: %s",
+		context,
+		question,
+	)
+}
+
+func (assistant *CodeAssistant) Ask(question string) (string, error) {
+	if assistant == nil {
+		return "", fmt.Errorf("code assistant must not be nil")
+	}
+	if strings.TrimSpace(question) == "" {
+		return "", fmt.Errorf("question must not be empty")
+	}
+	if assistant.SearchEngine == nil {
+		return "", fmt.Errorf("code search engine must not be nil")
+	}
+	if assistant.ContextBuilder == nil {
+		return "", fmt.Errorf("context builder must not be nil")
+	}
+	if assistant.Formatter == nil {
+		return "", fmt.Errorf("context formatter must not be nil")
+	}
+	if assistant.LLM == nil {
+		return "", fmt.Errorf("LLM client must not be nil")
+	}
+
+	const searchLimit = 5
+	results, err := assistant.SearchEngine.Search(question, searchLimit)
+	if err != nil {
+		return "", fmt.Errorf("search code: %w", err)
+	}
+	if len(results) == 0 {
+		return "I couldn't find relevant code for that question.", nil
+	}
+
+	chunks, err := assistant.ContextBuilder.Build(results)
+	if err != nil {
+		return "", fmt.Errorf("build code context: %w", err)
+	}
+	if len(chunks) == 0 {
+		return "I couldn't find relevant code for that question.", nil
+	}
+
+	formattedContext := assistant.Formatter.Format(chunks)
+	answer, err := assistant.LLM.Chat([]Message{{Role: "user", Content: buildPrompt(question, formattedContext)}})
+	if err != nil {
+		return "", fmt.Errorf("ask LLM: %w", err)
+	}
+
+	return answer, nil
+}
+
 type TokenCounter interface {
 	CountTokens(text string) (int, error)
 }
