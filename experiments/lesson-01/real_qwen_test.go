@@ -11,7 +11,13 @@ func TestRealCodePilotQuery(t *testing.T) {
 		t.Skip("set CODEPILOT_REAL_OLLAMA=1 to run the local Ollama integration")
 	}
 
-	const question = "Where is authentication handled?"
+	questions := []string{
+		"Where is authentication handled?",
+		"How does authentication work?",
+		"Where is a user's email updated?",
+		"How does the application find a user?",
+		"Where are password reset emails sent?",
+	}
 	embedder := NewEmbeddingClient("http://localhost:11434", "qwen3-embedding")
 	indexer := &CodeIndexer{Embedder: embedder}
 	engine, err := indexer.IndexRepository(filepath.Join("sample-project"))
@@ -23,15 +29,6 @@ func TestRealCodePilotQuery(t *testing.T) {
 	}
 	t.Logf("indexed %d chunks; embedding dimensions=%d", len(engine.Documents), len(engine.Documents[0].Embedding))
 
-	results, err := engine.Search(question, 5)
-	if err != nil {
-		t.Fatalf("Search() error = %v", err)
-	}
-	t.Log("Search results:")
-	for i, result := range results {
-		t.Logf("%d. %.6f %s (%s)", i+1, result.Score, result.Chunk.Name, result.Chunk.SourceFile)
-	}
-
 	chunks := make([]CodeChunk, len(engine.Documents))
 	for i, document := range engine.Documents {
 		chunks[i] = document.Chunk
@@ -41,14 +38,7 @@ func TestRealCodePilotQuery(t *testing.T) {
 		Tokenizer: embedder,
 		MaxTokens: 6000,
 	}
-	selected, err := builder.Build(results)
-	if err != nil {
-		t.Fatalf("Build() error = %v", err)
-	}
 	formatter := &ContextFormatter{}
-	formattedContext := formatter.Format(selected)
-	prompt := buildPrompt(question, formattedContext)
-	t.Logf("Formatted context and prompt:\n%s", prompt)
 
 	assistant := &CodeAssistant{
 		SearchEngine:   engine,
@@ -56,12 +46,26 @@ func TestRealCodePilotQuery(t *testing.T) {
 		Formatter:      formatter,
 		LLM:            NewLLMClient("http://localhost:11434", "qwen3:8b"),
 	}
-	answer, err := assistant.Ask(question)
-	if err != nil {
-		t.Fatalf("Ask() error = %v", err)
-	}
-	t.Logf("Qwen answer:\n%s", answer)
-	if answer == "" {
-		t.Fatal("Ask() returned an empty answer")
+
+	for _, question := range questions {
+		t.Logf("\nQuestion:\n%s", question)
+
+		results, err := engine.Search(question, 5)
+		if err != nil {
+			t.Fatalf("Search(%q) error = %v", question, err)
+		}
+		t.Log("Top results:")
+		for i, result := range results {
+			t.Logf("%d. %.6f %s (%s)", i+1, result.Score, result.Chunk.Name, result.Chunk.SourceFile)
+		}
+
+		answer, err := assistant.Ask(question)
+		if err != nil {
+			t.Fatalf("Ask(%q) error = %v", question, err)
+		}
+		t.Logf("Final answer:\n%s", answer)
+		if answer == "" {
+			t.Errorf("Ask(%q) returned an empty answer", question)
+		}
 	}
 }
