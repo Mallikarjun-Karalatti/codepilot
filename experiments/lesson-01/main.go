@@ -642,6 +642,14 @@ func receiverTypeName(field *ast.Field) (string, error) {
 }
 
 func (c *CodeChunker) Chunk(sourceFile string, source string) ([]CodeChunk, error) {
+	return c.chunk(sourceFile, source, nil)
+}
+
+func (c *CodeChunker) chunk(
+	sourceFile string,
+	source string,
+	knownStructNames map[string]struct{},
+) ([]CodeChunk, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, sourceFile, source, 0)
 	if err != nil {
@@ -755,6 +763,9 @@ func (c *CodeChunker) Chunk(sourceFile string, source string) ([]CodeChunk, erro
 
 		parentID, ok := structIDs[chunks[i].ParentName]
 		if !ok {
+			if _, known := knownStructNames[chunks[i].ParentName]; known {
+				continue
+			}
 			return nil, fmt.Errorf(
 				"parent struct %q not found for method %q",
 				chunks[i].ParentName,
