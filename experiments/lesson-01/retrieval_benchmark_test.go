@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 )
 
@@ -66,6 +67,7 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 	answerableCount := 0
 	negativeCount := 0
 	var semanticTotals, lexicalTotals, hybridTotals benchmarkTotals
+	categoryTotals := make(map[string]*categoryBenchmarkTotals)
 	for _, benchmarkCase := range retrievalBenchmarkCases() {
 		semantic, err := engine.Search(benchmarkCase.Question, evaluationK)
 		if err != nil {
@@ -109,6 +111,15 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 		semanticTotals.add(semanticMetrics)
 		lexicalTotals.add(lexicalMetrics)
 		hybridTotals.add(hybridMetrics)
+		category := categoryTotals[benchmarkCase.Category]
+		if category == nil {
+			category = &categoryBenchmarkTotals{}
+			categoryTotals[benchmarkCase.Category] = category
+		}
+		category.count++
+		category.semantic.add(semanticMetrics)
+		category.lexical.add(lexicalMetrics)
+		category.hybrid.add(hybridMetrics)
 		t.Logf("expected=%v", benchmarkCase.ExpectedNames)
 		t.Logf("Semantic: %s", semanticMetrics.String())
 		t.Logf("Lexical-v2: %s", lexicalMetrics.String())
@@ -125,6 +136,28 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 	t.Logf("Semantic:  %s", semanticTotals.mean(answerableCount).String())
 	t.Logf("Lexical-v2: %s", lexicalTotals.mean(answerableCount).String())
 	t.Logf("Hybrid:    %s", hybridTotals.mean(answerableCount).String())
+	categoryNames := make([]string, 0, len(categoryTotals))
+	for categoryName := range categoryTotals {
+		categoryNames = append(categoryNames, categoryName)
+	}
+	sort.Strings(categoryNames)
+	t.Log("Category breakdown (means over answerable queries):")
+	t.Log("Category | N | System | Recall@1 | Recall@3 | Recall@5 | MRR")
+	for _, categoryName := range categoryNames {
+		category := categoryTotals[categoryName]
+		for _, system := range []struct {
+			name   string
+			totals benchmarkTotals
+		}{
+			{name: "Semantic", totals: category.semantic},
+			{name: "Lexical-v2", totals: category.lexical},
+			{name: "Hybrid", totals: category.hybrid},
+		} {
+			mean := system.totals.mean(category.count)
+			t.Logf("%s | %d | %s | %.3f | %.3f | %.3f | %.3f",
+				categoryName, category.count, system.name, mean.recall1, mean.recall3, mean.recall5, mean.mrr)
+		}
+	}
 	t.Logf("Negative-query false retrieval rate (%d queries, any top-%d result): Semantic=%.3f (%d/%d), Lexical-v2=%.3f (%d/%d), Hybrid=%.3f (%d/%d)",
 		negativeCount, evaluationK,
 		float64(semanticTotals.negativeRetrieved)/float64(negativeCount), semanticTotals.negativeRetrieved, negativeCount,
@@ -189,6 +222,13 @@ type benchmarkTotals struct {
 	recall5           float64
 	mrr               float64
 	negativeRetrieved int
+}
+
+type categoryBenchmarkTotals struct {
+	count    int
+	semantic benchmarkTotals
+	lexical  benchmarkTotals
+	hybrid   benchmarkTotals
 }
 
 func (totals *benchmarkTotals) add(metrics benchmarkMetrics) {
