@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestCodeAwareTokenizer(t *testing.T) {
 	}
 }
 
-func TestLexicalScorerWeightsFieldsAndNormalizesBothSides(t *testing.T) {
+func TestLexicalScorerWeightsFieldsAndNormalizesTokens(t *testing.T) {
 	scorer := &LexicalScorer{Tokenizer: CodeAwareTokenizer{}}
 	chunk := CodeChunk{
 		Name:       "AuthenticateUser",
@@ -60,5 +61,41 @@ func TestLexicalScorerMatchesParentName(t *testing.T) {
 func TestLexicalScorerRequiresTokenizer(t *testing.T) {
 	if _, _, err := (&LexicalScorer{}).Score("query", CodeChunk{}); err == nil {
 		t.Fatal("Score() error = nil, want missing tokenizer error")
+	}
+}
+
+func TestBuildLexicalIndexCountsDocumentFrequencyOncePerChunk(t *testing.T) {
+	tokenizer := CodeAwareTokenizer{}
+	chunks := []CodeChunk{
+		{Name: "User", ParentName: "User", Text: "User user"},
+		{Name: "UserService", Text: "func (u *UserService) GetUser() {}"},
+		{Name: "AuthenticateToken", Text: "authentication"},
+	}
+
+	index, err := BuildLexicalIndex(chunks, tokenizer)
+	if err != nil {
+		t.Fatalf("BuildLexicalIndex() error = %v", err)
+	}
+	if index.DocumentCount != 3 {
+		t.Errorf("DocumentCount = %d, want 3", index.DocumentCount)
+	}
+	if got := index.DocumentFrequency["user"]; got != 2 {
+		t.Errorf("DocumentFrequency[user] = %d, want 2", got)
+	}
+	if got := index.DocumentFrequency["authentic"]; got != 1 {
+		t.Errorf("DocumentFrequency[authentic] = %d, want 1", got)
+	}
+	if index.IDF("authentic") <= index.IDF("user") {
+		t.Errorf("IDF(authentic) = %v, IDF(user) = %v; want rare term to weigh more", index.IDF("authentic"), index.IDF("user"))
+	}
+	wantRareIDF := math.Log(4.0 / 2.0)
+	if got := index.IDF("authentic"); math.Abs(got-wantRareIDF) > 1e-12 {
+		t.Errorf("IDF(authentic) = %v, want %v", got, wantRareIDF)
+	}
+}
+
+func TestBuildLexicalIndexRequiresTokenizer(t *testing.T) {
+	if _, err := BuildLexicalIndex(nil, nil); err == nil {
+		t.Fatal("BuildLexicalIndex() error = nil, want missing tokenizer error")
 	}
 }

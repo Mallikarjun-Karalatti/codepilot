@@ -35,52 +35,72 @@ func TestRealLexicalRetrievalEvaluation(t *testing.T) {
 	for i, document := range engine.Documents {
 		chunks[i] = document.Chunk
 	}
-	scorer := &LexicalScorer{Tokenizer: CodeAwareTokenizer{}}
+	tokenizer := CodeAwareTokenizer{}
+	v1Scorer := &LexicalScorer{Tokenizer: tokenizer}
+	lexicalIndex, err := BuildLexicalIndex(chunks, tokenizer)
+	if err != nil {
+		t.Fatalf("BuildLexicalIndex() error = %v", err)
+	}
+	v2Scorer := &LexicalScorer{Tokenizer: tokenizer, Index: lexicalIndex}
 	const topK = 5
 
 	cases := append(retrievalEvaluationCases(), RetrievalTestCase{Question: negativeRetrievalQuestion})
 	var semanticRecallTotal, semanticMRRTotal float64
-	var lexicalRecallTotal, lexicalMRRTotal float64
+	var lexicalV1RecallTotal, lexicalV1MRRTotal float64
+	var lexicalV2RecallTotal, lexicalV2MRRTotal float64
 	for _, testCase := range cases {
 		t.Run(testCase.Question, func(t *testing.T) {
 			semantic, err := engine.Search(testCase.Question, len(engine.Documents))
 			if err != nil {
 				t.Fatalf("semantic Search() error = %v", err)
 			}
-			lexical, err := rankLexically(scorer, testCase.Question, chunks)
+			lexicalV1, err := rankLexically(v1Scorer, testCase.Question, chunks)
 			if err != nil {
-				t.Fatalf("rankLexically() error = %v", err)
+				t.Fatalf("rankLexically(v1) error = %v", err)
+			}
+			lexicalV2, err := rankLexically(v2Scorer, testCase.Question, chunks)
+			if err != nil {
+				t.Fatalf("rankLexically(v2) error = %v", err)
 			}
 
 			t.Logf("Question: %s", testCase.Question)
 			logTopResults(t, "Semantic", semantic, topK)
-			topLexical := make([]CodeSearchResult, 0, topK)
-			for i := 0; i < len(lexical) && i < topK; i++ {
-				topLexical = append(topLexical, CodeSearchResult{Chunk: lexical[i].Chunk, Score: lexical[i].Score})
-			}
-			logTopResults(t, "Lexical", topLexical, topK)
+			logTopResults(t, "Lexical-v1", asCodeSearchResults(lexicalV1), topK)
+			logTopResults(t, "Lexical-v2 IDF", asCodeSearchResults(lexicalV2), topK)
 
 			if len(testCase.ExpectedNames) > 0 {
 				semanticRecall, semanticMRR := retrievalMetrics(semantic, testCase.ExpectedNames, topK)
-				lexicalRecall, lexicalMRR := lexicalRetrievalMetrics(lexical, testCase.ExpectedNames, topK)
-				t.Logf("Metrics: Semantic Recall@%d=%.3f MRR=%.3f; Lexical Recall@%d=%.3f MRR=%.3f",
-					topK, semanticRecall, semanticMRR, topK, lexicalRecall, lexicalMRR)
+				lexicalV1Recall, lexicalV1MRR := retrievalMetrics(asCodeSearchResults(lexicalV1), testCase.ExpectedNames, topK)
+				lexicalV2Recall, lexicalV2MRR := retrievalMetrics(asCodeSearchResults(lexicalV2), testCase.ExpectedNames, topK)
+				t.Logf("Metrics: Semantic Recall@%d=%.3f MRR=%.3f; Lexical-v1 Recall@%d=%.3f MRR=%.3f; Lexical-v2 Recall@%d=%.3f MRR=%.3f",
+					topK, semanticRecall, semanticMRR,
+					topK, lexicalV1Recall, lexicalV1MRR,
+					topK, lexicalV2Recall, lexicalV2MRR)
 				semanticRecallTotal += semanticRecall
 				semanticMRRTotal += semanticMRR
-				lexicalRecallTotal += lexicalRecall
-				lexicalMRRTotal += lexicalMRR
+				lexicalV1RecallTotal += lexicalV1Recall
+				lexicalV1MRRTotal += lexicalV1MRR
+				lexicalV2RecallTotal += lexicalV2Recall
+				lexicalV2MRRTotal += lexicalV2MRR
 			} else {
 				t.Log("Negative example: no expected relevant chunks; recall and MRR are not calculated.")
 			}
 
-			logChangedRanks(t, semantic, lexical, topK)
+			t.Log("Rank changes: Semantic vs Lexical-v1")
+			logRankChanges(t, "Semantic", semantic, "Lexical-v1", asCodeSearchResults(lexicalV1), topK)
+			t.Log("Rank changes: Semantic vs Lexical-v2")
+			logRankChanges(t, "Semantic", semantic, "Lexical-v2", asCodeSearchResults(lexicalV2), topK)
+			t.Log("Rank changes: Lexical-v1 vs Lexical-v2")
+			logRankChanges(t, "Lexical-v1", asCodeSearchResults(lexicalV1), "Lexical-v2", asCodeSearchResults(lexicalV2), topK)
 		})
 	}
 
 	caseCount := float64(len(retrievalEvaluationCases()))
-	t.Logf("Mean over %d answerable queries: Semantic Recall@%d=%.3f MRR=%.3f; Lexical Recall@%d=%.3f MRR=%.3f",
-		int(caseCount), topK, semanticRecallTotal/caseCount, semanticMRRTotal/caseCount,
-		topK, lexicalRecallTotal/caseCount, lexicalMRRTotal/caseCount)
+	t.Logf("Mean over %d answerable queries: Semantic Recall@%d=%.3f MRR=%.3f; Lexical-v1 Recall@%d=%.3f MRR=%.3f; Lexical-v2 Recall@%d=%.3f MRR=%.3f",
+		int(caseCount),
+		topK, semanticRecallTotal/caseCount, semanticMRRTotal/caseCount,
+		topK, lexicalV1RecallTotal/caseCount, lexicalV1MRRTotal/caseCount,
+		topK, lexicalV2RecallTotal/caseCount, lexicalV2MRRTotal/caseCount)
 }
 
 func retrievalMetrics(results []CodeSearchResult, expectedNames []string, topK int) (float64, float64) {
@@ -104,12 +124,12 @@ func retrievalMetrics(results []CodeSearchResult, expectedNames []string, topK i
 	return recall, mrr
 }
 
-func lexicalRetrievalMetrics(results []lexicalSearchResult, expectedNames []string, topK int) (float64, float64) {
+func asCodeSearchResults(results []lexicalSearchResult) []CodeSearchResult {
 	converted := make([]CodeSearchResult, len(results))
 	for i, result := range results {
 		converted[i] = CodeSearchResult{Chunk: result.Chunk, Score: result.Score}
 	}
-	return retrievalMetrics(converted, expectedNames, topK)
+	return converted
 }
 
 func logTopResults(t *testing.T, label string, results []CodeSearchResult, topK int) {
@@ -121,17 +141,17 @@ func logTopResults(t *testing.T, label string, results []CodeSearchResult, topK 
 	}
 }
 
-func logChangedRanks(t *testing.T, semantic []CodeSearchResult, lexical []lexicalSearchResult, topK int) {
+func logRankChanges(t *testing.T, firstLabel string, first []CodeSearchResult, secondLabel string, second []CodeSearchResult, topK int) {
 	t.Helper()
-	semanticRanks := make(map[int]int, len(semantic))
-	lexicalRanks := make(map[int]int, len(lexical))
-	chunksByID := make(map[int]CodeChunk, len(semantic))
-	for rank, result := range semantic {
-		semanticRanks[result.Chunk.ID] = rank + 1
+	firstRanks := make(map[int]int, len(first))
+	secondRanks := make(map[int]int, len(second))
+	chunksByID := make(map[int]CodeChunk, len(first))
+	for rank, result := range first {
+		firstRanks[result.Chunk.ID] = rank + 1
 		chunksByID[result.Chunk.ID] = result.Chunk
 	}
-	for rank, result := range lexical {
-		lexicalRanks[result.Chunk.ID] = rank + 1
+	for rank, result := range second {
+		secondRanks[result.Chunk.ID] = rank + 1
 		chunksByID[result.Chunk.ID] = result.Chunk
 	}
 	ids := make([]int, 0, len(chunksByID))
@@ -139,27 +159,26 @@ func logChangedRanks(t *testing.T, semantic []CodeSearchResult, lexical []lexica
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
-	t.Log("Changed ranks (chunks appearing in either top five):")
 	for _, id := range ids {
 		chunk := chunksByID[id]
-		semanticRank, semanticInTop := semanticRanks[id]
-		lexicalRank, lexicalInTop := lexicalRanks[id]
-		semanticInTop = semanticInTop && semanticRank <= topK
-		lexicalInTop = lexicalInTop && lexicalRank <= topK
-		if !semanticInTop && !lexicalInTop {
+		firstRank, firstExists := firstRanks[id]
+		secondRank, secondExists := secondRanks[id]
+		firstInTop := firstExists && firstRank <= topK
+		secondInTop := secondExists && secondRank <= topK
+		if !firstInTop && !secondInTop {
 			continue
 		}
-		if semanticRank == lexicalRank && semanticInTop && lexicalInTop {
+		if firstRank == secondRank && firstInTop && secondInTop {
 			continue
 		}
-		semanticPosition := "not retrieved"
-		if semanticRank, exists := semanticRanks[id]; exists {
-			semanticPosition = fmt.Sprintf("#%d", semanticRank)
+		firstPosition := "not retrieved"
+		if firstExists {
+			firstPosition = fmt.Sprintf("#%d", firstRank)
 		}
-		lexicalPosition := "not retrieved"
-		if lexicalRank, exists := lexicalRanks[id]; exists {
-			lexicalPosition = fmt.Sprintf("#%d", lexicalRank)
+		secondPosition := "not retrieved"
+		if secondExists {
+			secondPosition = fmt.Sprintf("#%d", secondRank)
 		}
-		t.Logf("%s (%s): semantic %s, lexical %s", chunk.Name, chunk.SourceFile, semanticPosition, lexicalPosition)
+		t.Logf("%s (%s): %s %s, %s %s", chunk.Name, chunk.SourceFile, firstLabel, firstPosition, secondLabel, secondPosition)
 	}
 }

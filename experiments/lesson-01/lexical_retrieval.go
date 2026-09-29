@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode"
@@ -74,6 +75,43 @@ func normalizeLexicalToken(token string) string {
 
 type LexicalScorer struct {
 	Tokenizer Tokenizer
+	Index     *LexicalIndex
+}
+
+type LexicalIndex struct {
+	DocumentCount     int
+	DocumentFrequency map[string]int
+}
+
+func BuildLexicalIndex(chunks []CodeChunk, tokenizer Tokenizer) (*LexicalIndex, error) {
+	if tokenizer == nil {
+		return nil, fmt.Errorf("tokenizer must not be nil")
+	}
+
+	index := &LexicalIndex{
+		DocumentCount:     len(chunks),
+		DocumentFrequency: make(map[string]int),
+	}
+	for _, chunk := range chunks {
+		documentTokens := make(map[string]struct{})
+		for _, text := range []string{chunk.Name, chunk.ParentName, chunk.Text} {
+			for _, token := range tokenizer.Tokenize(text) {
+				documentTokens[token] = struct{}{}
+			}
+		}
+		for token := range documentTokens {
+			index.DocumentFrequency[token]++
+		}
+	}
+	return index, nil
+}
+
+func (index *LexicalIndex) IDF(token string) float64 {
+	if index == nil || index.DocumentCount == 0 {
+		return 0
+	}
+	documentFrequency := index.DocumentFrequency[token]
+	return math.Log(float64(index.DocumentCount+1) / float64(documentFrequency+1))
 }
 
 type LexicalMatchDetails struct {
@@ -103,15 +141,27 @@ func (scorer *LexicalScorer) Score(
 		parentNameWeight = 2.0
 		textWeight       = 1.0
 	)
-	score := float64(len(nameMatches))*nameWeight +
-		float64(len(parentMatches))*parentNameWeight +
-		float64(len(textMatches))*textWeight
+	score := scorer.weightedMatches(nameMatches, nameWeight) +
+		scorer.weightedMatches(parentMatches, parentNameWeight) +
+		scorer.weightedMatches(textMatches, textWeight)
 
 	return score, LexicalMatchDetails{
 		NameMatches:       nameMatches,
 		ParentNameMatches: parentMatches,
 		TextMatches:       textMatches,
 	}, nil
+}
+
+func (scorer *LexicalScorer) weightedMatches(matches []string, fieldWeight float64) float64 {
+	score := 0.0
+	for _, match := range matches {
+		idf := 1.0
+		if scorer.Index != nil {
+			idf = scorer.Index.IDF(match)
+		}
+		score += fieldWeight * idf
+	}
+	return score
 }
 
 func uniqueTokens(tokens []string) []string {
