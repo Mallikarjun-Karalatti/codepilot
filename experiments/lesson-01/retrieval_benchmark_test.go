@@ -83,7 +83,7 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 	)
 	answerableCount := 0
 	negativeCount := 0
-	var semanticTotals, lexicalTotals, hybridTotals, callsTotals, structuralTotals benchmarkTotals
+	var semanticTotals, lexicalTotals, hybridTotals, selectedTotals, directFirstTotals benchmarkTotals
 	categoryTotals := make(map[string]*categoryBenchmarkTotals)
 	for _, benchmarkCase := range retrievalBenchmarkCases() {
 		semantic, err := engine.Search(benchmarkCase.Question, evaluationK)
@@ -103,22 +103,25 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 			continue
 		}
 		hybridResults := takeCodeSearchResults(hybridAsCodeSearchResults(hybrid), evaluationK)
-		hybridCandidates := make([]CodeChunk, len(hybridResults))
-		for i, result := range hybridResults {
-			hybridCandidates[i] = result.Chunk
-		}
-		expandedChunks, err := relationshipGraph.ExpandCalls(hybridCandidates, evaluationK)
+		structuralEvidence, err := relationshipGraph.ExpandCallsAndParents(hybridResults)
 		if err != nil {
-			t.Errorf("ExpandCalls(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("ExpandCallsAndParents(%q) error = %v", benchmarkCase.Question, err)
 			continue
 		}
-		expandedResults := chunksAsCodeSearchResults(expandedChunks)
-		structuralChunks, err := relationshipGraph.ExpandCallsAndChildren(hybridCandidates, evaluationK)
+		selector := &EvidenceSelector{MaxChunks: evaluationK}
+		selectedChunks, err := selector.Select(structuralEvidence)
 		if err != nil {
-			t.Errorf("ExpandCallsAndChildren(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("EvidenceSelector.Select(%q) error = %v", benchmarkCase.Question, err)
 			continue
 		}
-		structuralResults := chunksAsCodeSearchResults(structuralChunks)
+		selectedResults := chunksAsCodeSearchResults(selectedChunks)
+		directFirstSelector := &EvidenceSelector{MaxChunks: evaluationK, Policy: EvidencePolicyDirectFirst}
+		directFirstChunks, err := directFirstSelector.Select(structuralEvidence)
+		if err != nil {
+			t.Errorf("DirectFirstSelector.Select(%q) error = %v", benchmarkCase.Question, err)
+			continue
+		}
+		directFirstResults := chunksAsCodeSearchResults(directFirstChunks)
 
 		t.Logf("[%s] %s", benchmarkCase.Category, benchmarkCase.Question)
 		if len(benchmarkCase.ExpectedNames) == 0 {
@@ -126,20 +129,21 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 			semanticFalse := len(semantic) > 0
 			lexicalFalse := len(lexical) > 0
 			hybridFalse := len(hybridResults) > 0
-			expandedFalse := len(expandedResults) > 0
-			structuralFalse := len(structuralResults) > 0
+			selectedFalse := len(selectedResults) > 0
+			directFirstFalse := len(directFirstResults) > 0
 			semanticTotals.negativeRetrieved += boolInt(semanticFalse)
 			lexicalTotals.negativeRetrieved += boolInt(lexicalFalse)
 			hybridTotals.negativeRetrieved += boolInt(hybridFalse)
-			callsTotals.negativeRetrieved += boolInt(expandedFalse)
-			structuralTotals.negativeRetrieved += boolInt(structuralFalse)
-			t.Logf("negative false retrieval: Semantic=%t Lexical-v2=%t Hybrid=%t Hybrid+Calls=%t Hybrid+Structure=%t (any result in top %d)",
-				semanticFalse, lexicalFalse, hybridFalse, expandedFalse, structuralFalse, evaluationK)
+			selectedTotals.negativeRetrieved += boolInt(selectedFalse)
+			directFirstTotals.negativeRetrieved += boolInt(directFirstFalse)
+			t.Logf("negative false retrieval: Semantic=%t Lexical-v2=%t Hybrid=%t RequiredParent=%t DirectFirst=%t (any result in top %d)",
+				semanticFalse, lexicalFalse, hybridFalse, selectedFalse, directFirstFalse, evaluationK)
 			logBenchmarkTopResults(t, "Semantic", semantic)
 			logBenchmarkTopResults(t, "Lexical-v2", lexical)
 			logBenchmarkTopResults(t, "Hybrid", hybridResults)
-			logBenchmarkChunkResults(t, "Hybrid+Calls", expandedChunks)
-			logBenchmarkChunkResults(t, "Hybrid+Structure", structuralChunks)
+			logBenchmarkEvidenceResults(t, "Discovered evidence", structuralEvidence)
+			logBenchmarkChunkResults(t, "Hybrid+EvidenceSelection", selectedChunks)
+			logBenchmarkChunkResults(t, "Hybrid+DirectFirst", directFirstChunks)
 			continue
 		}
 
@@ -147,13 +151,13 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 		semanticMetrics := calculateBenchmarkMetrics(semantic, benchmarkCase.ExpectedNames)
 		lexicalMetrics := calculateBenchmarkMetrics(lexical, benchmarkCase.ExpectedNames)
 		hybridMetrics := calculateBenchmarkMetrics(hybridResults, benchmarkCase.ExpectedNames)
-		expandedMetrics := calculateBenchmarkMetrics(expandedResults, benchmarkCase.ExpectedNames)
-		structuralMetrics := calculateBenchmarkMetrics(structuralResults, benchmarkCase.ExpectedNames)
+		selectedMetrics := calculateBenchmarkMetrics(selectedResults, benchmarkCase.ExpectedNames)
+		directFirstMetrics := calculateBenchmarkMetrics(directFirstResults, benchmarkCase.ExpectedNames)
 		semanticTotals.add(semanticMetrics)
 		lexicalTotals.add(lexicalMetrics)
 		hybridTotals.add(hybridMetrics)
-		callsTotals.add(expandedMetrics)
-		structuralTotals.add(structuralMetrics)
+		selectedTotals.add(selectedMetrics)
+		directFirstTotals.add(directFirstMetrics)
 		category := categoryTotals[benchmarkCase.Category]
 		if category == nil {
 			category = &categoryBenchmarkTotals{}
@@ -163,19 +167,20 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 		category.semantic.add(semanticMetrics)
 		category.lexical.add(lexicalMetrics)
 		category.hybrid.add(hybridMetrics)
-		category.expanded.add(expandedMetrics)
-		category.structural.add(structuralMetrics)
+		category.selected.add(selectedMetrics)
+		category.directFirst.add(directFirstMetrics)
 		t.Logf("expected=%v", benchmarkCase.ExpectedNames)
 		t.Logf("Semantic: %s", semanticMetrics.String())
 		t.Logf("Lexical-v2: %s", lexicalMetrics.String())
 		t.Logf("Hybrid: %s", hybridMetrics.String())
-		t.Logf("Hybrid+Calls: %s", expandedMetrics.String())
-		t.Logf("Hybrid+Structure: %s", structuralMetrics.String())
+		t.Logf("Hybrid+EvidenceSelection: %s", selectedMetrics.String())
+		t.Logf("Hybrid+DirectFirst: %s", directFirstMetrics.String())
 		logBenchmarkTopResults(t, "Semantic", semantic)
 		logBenchmarkTopResults(t, "Lexical-v2", lexical)
 		logBenchmarkTopResults(t, "Hybrid", hybridResults)
-		logBenchmarkChunkResults(t, "Hybrid+Calls", expandedChunks)
-		logBenchmarkChunkResults(t, "Hybrid+Structure", structuralChunks)
+		logBenchmarkEvidenceResults(t, "Discovered evidence", structuralEvidence)
+		logBenchmarkChunkResults(t, "Hybrid+EvidenceSelection", selectedChunks)
+		logBenchmarkChunkResults(t, "Hybrid+DirectFirst", directFirstChunks)
 	}
 
 	if answerableCount == 0 || negativeCount == 0 {
@@ -185,8 +190,8 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 	t.Logf("Semantic:  %s", semanticTotals.mean(answerableCount).String())
 	t.Logf("Lexical-v2: %s", lexicalTotals.mean(answerableCount).String())
 	t.Logf("Hybrid:    %s", hybridTotals.mean(answerableCount).String())
-	t.Logf("Hybrid+Calls: %s", callsTotals.mean(answerableCount).String())
-	t.Logf("Hybrid+Structure: %s", structuralTotals.mean(answerableCount).String())
+	t.Logf("Hybrid+EvidenceSelection: %s", selectedTotals.mean(answerableCount).String())
+	t.Logf("Hybrid+DirectFirst: %s", directFirstTotals.mean(answerableCount).String())
 	categoryNames := make([]string, 0, len(categoryTotals))
 	for categoryName := range categoryTotals {
 		categoryNames = append(categoryNames, categoryName)
@@ -203,21 +208,21 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 			{name: "Semantic", totals: category.semantic},
 			{name: "Lexical-v2", totals: category.lexical},
 			{name: "Hybrid", totals: category.hybrid},
-			{name: "Hybrid+Calls", totals: category.expanded},
-			{name: "Hybrid+Structure", totals: category.structural},
+			{name: "Hybrid+EvidenceSelection", totals: category.selected},
+			{name: "Hybrid+DirectFirst", totals: category.directFirst},
 		} {
 			mean := system.totals.mean(category.count)
 			t.Logf("%s | %d | %s | %.3f | %.3f | %.3f | %.3f",
 				categoryName, category.count, system.name, mean.recall1, mean.recall3, mean.recall5, mean.mrr)
 		}
 	}
-	t.Logf("Negative-query false retrieval rate (%d queries, any top-%d result): Semantic=%.3f (%d/%d), Lexical-v2=%.3f (%d/%d), Hybrid=%.3f (%d/%d), Hybrid+Calls=%.3f (%d/%d), Hybrid+Structure=%.3f (%d/%d)",
+	t.Logf("Negative-query false retrieval rate (%d queries, any top-%d result): Semantic=%.3f (%d/%d), Lexical-v2=%.3f (%d/%d), Hybrid=%.3f (%d/%d), RequiredParent=%.3f (%d/%d), DirectFirst=%.3f (%d/%d)",
 		negativeCount, evaluationK,
 		float64(semanticTotals.negativeRetrieved)/float64(negativeCount), semanticTotals.negativeRetrieved, negativeCount,
 		float64(lexicalTotals.negativeRetrieved)/float64(negativeCount), lexicalTotals.negativeRetrieved, negativeCount,
 		float64(hybridTotals.negativeRetrieved)/float64(negativeCount), hybridTotals.negativeRetrieved, negativeCount,
-		float64(callsTotals.negativeRetrieved)/float64(negativeCount), callsTotals.negativeRetrieved, negativeCount,
-		float64(structuralTotals.negativeRetrieved)/float64(negativeCount), structuralTotals.negativeRetrieved, negativeCount)
+		float64(selectedTotals.negativeRetrieved)/float64(negativeCount), selectedTotals.negativeRetrieved, negativeCount,
+		float64(directFirstTotals.negativeRetrieved)/float64(negativeCount), directFirstTotals.negativeRetrieved, negativeCount)
 }
 
 type benchmarkMetrics struct {
@@ -280,12 +285,20 @@ type benchmarkTotals struct {
 }
 
 type categoryBenchmarkTotals struct {
-	count      int
-	semantic   benchmarkTotals
-	lexical    benchmarkTotals
-	hybrid     benchmarkTotals
-	expanded   benchmarkTotals
-	structural benchmarkTotals
+	count       int
+	semantic    benchmarkTotals
+	lexical     benchmarkTotals
+	hybrid      benchmarkTotals
+	selected    benchmarkTotals
+	directFirst benchmarkTotals
+}
+
+func evidenceAsCodeSearchResults(evidence []EvidenceCandidate) []CodeSearchResult {
+	results := make([]CodeSearchResult, len(evidence))
+	for i, candidate := range evidence {
+		results[i] = CodeSearchResult{Chunk: candidate.Chunk, Score: candidate.Score}
+	}
+	return results
 }
 
 func chunksAsCodeSearchResults(chunks []CodeChunk) []CodeSearchResult {
@@ -325,6 +338,18 @@ func logBenchmarkTopResults(t *testing.T, label string, results []CodeSearchResu
 	t.Logf("%s top results: %v", label, names)
 }
 
+func logBenchmarkEvidenceResults(t *testing.T, label string, evidence []EvidenceCandidate) {
+	t.Helper()
+	var names []string
+	for i, candidate := range evidence {
+		if i == 5 {
+			break
+		}
+		names = append(names, fmt.Sprintf("%s[%s anchor=%d score=%.3f]", candidate.Chunk.Name, candidate.Origin, candidate.AnchorID, candidate.Score))
+	}
+	t.Logf("%s evidence: %v", label, names)
+}
+
 func logBenchmarkChunkResults(t *testing.T, label string, chunks []CodeChunk) {
 	t.Helper()
 	var names []string
@@ -334,7 +359,7 @@ func logBenchmarkChunkResults(t *testing.T, label string, chunks []CodeChunk) {
 		}
 		names = append(names, chunk.Name)
 	}
-	t.Logf("%s evidence: %v", label, names)
+	t.Logf("%s selected chunks: %v", label, names)
 }
 
 func boolInt(value bool) int {

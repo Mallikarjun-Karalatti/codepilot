@@ -24,6 +24,7 @@ type CodeRelationshipGraph struct {
 	Relationships []CodeRelationship
 	chunksByID    map[int]CodeChunk
 	bySource      map[int][]CodeRelationship
+	byTarget      map[int][]CodeRelationship
 }
 
 type relationshipKey struct {
@@ -41,6 +42,7 @@ func BuildCodeRelationshipGraph(root string, chunks []CodeChunk) (*CodeRelations
 	graph := &CodeRelationshipGraph{
 		chunksByID: make(map[int]CodeChunk, len(chunks)),
 		bySource:   make(map[int][]CodeRelationship),
+		byTarget:   make(map[int][]CodeRelationship),
 	}
 	chunksByFile := make(map[string]map[string]int)
 	packages := make(map[string]*relationshipPackageIndex)
@@ -135,6 +137,7 @@ func BuildCodeRelationshipGraph(root string, chunks []CodeChunk) (*CodeRelations
 		relationship := CodeRelationship{FromChunkID: key.from, ToChunkID: key.to, Kind: key.kind}
 		graph.Relationships = append(graph.Relationships, relationship)
 		graph.bySource[relationship.FromChunkID] = append(graph.bySource[relationship.FromChunkID], relationship)
+		graph.byTarget[relationship.ToChunkID] = append(graph.byTarget[relationship.ToChunkID], relationship)
 	}
 	sort.Slice(graph.Relationships, func(i, j int) bool {
 		if graph.Relationships[i].FromChunkID != graph.Relationships[j].FromChunkID {
@@ -156,53 +159,62 @@ func BuildCodeRelationshipGraph(root string, chunks []CodeChunk) (*CodeRelations
 	return graph, nil
 }
 
-func (graph *CodeRelationshipGraph) ExpandCalls(candidates []CodeChunk, limit int) ([]CodeChunk, error) {
-	return graph.expand(candidates, limit, RelationshipCalls)
+func (graph *CodeRelationshipGraph) ExpandCalls(candidates []CodeSearchResult) ([]EvidenceCandidate, error) {
+	return graph.expandEvidence(candidates, RelationshipCalls)
 }
 
-func (graph *CodeRelationshipGraph) ExpandChildren(candidates []CodeChunk, limit int) ([]CodeChunk, error) {
-	return graph.expand(candidates, limit, RelationshipHasMethod)
+func (graph *CodeRelationshipGraph) ExpandParents(candidates []CodeSearchResult) ([]EvidenceCandidate, error) {
+	return graph.expandEvidence(candidates, RelationshipHasMethod)
 }
 
-func (graph *CodeRelationshipGraph) ExpandCallsAndChildren(candidates []CodeChunk, limit int) ([]CodeChunk, error) {
-	return graph.expand(candidates, limit, RelationshipCalls, RelationshipHasMethod)
+func (graph *CodeRelationshipGraph) ExpandCallsAndParents(candidates []CodeSearchResult) ([]EvidenceCandidate, error) {
+	return graph.expandEvidence(candidates, RelationshipCalls, RelationshipHasMethod)
 }
 
-func (graph *CodeRelationshipGraph) expand(candidates []CodeChunk, limit int, kinds ...string) ([]CodeChunk, error) {
+func (graph *CodeRelationshipGraph) expandEvidence(candidates []CodeSearchResult, kinds ...string) ([]EvidenceCandidate, error) {
 	if graph == nil {
 		return nil, fmt.Errorf("code relationship graph must not be nil")
 	}
-	if limit <= 0 {
-		return nil, fmt.Errorf("expansion limit must be greater than 0")
-	}
-	selected := make([]CodeChunk, 0, limit)
-	seen := make(map[int]struct{}, limit)
-	appendChunk := func(chunk CodeChunk) {
-		if len(selected) >= limit {
+	discovered := make([]EvidenceCandidate, 0, len(candidates))
+	evidenceByID := make(map[int]int, len(candidates))
+	appendEvidence := func(candidateEvidence EvidenceCandidate) {
+		if index, ok := evidenceByID[candidateEvidence.Chunk.ID]; ok {
+			// A chunk found directly is the stronger evidence source. Promote it
+			// while retaining its ranked retrieval score.
+			if candidateEvidence.Origin == EvidenceDirect {
+				// Keep its position at the first discovery point for stable order.
+				// Direct results themselves are already ranked by the retriever.
+				// (The map only controls de-duplication.)
+				discovered[index] = candidateEvidence
+			}
 			return
 		}
-		if _, ok := seen[chunk.ID]; ok {
-			return
-		}
-		seen[chunk.ID] = struct{}{}
-		selected = append(selected, chunk)
+		evidenceByID[candidateEvidence.Chunk.ID] = len(discovered)
+		discovered = append(discovered, candidateEvidence)
 	}
-	for _, candidate := range candidates {
-		appendChunk(candidate)
+	for _, result := range candidates {
+		candidate := result.Chunk
+		appendEvidence(EvidenceCandidate{Chunk: candidate, Origin: EvidenceDirect, Score: result.Score})
+		for _, relationship := range graph.byTarget[candidate.ID] {
+			if relationship.Kind != RelationshipHasMethod || !includesString(kinds, RelationshipHasMethod) {
+				continue
+			}
+			parent, ok := graph.chunksByID[relationship.FromChunkID]
+			if ok {
+				appendEvidence(EvidenceCandidate{Chunk: parent, Origin: EvidenceParent, AnchorID: candidate.ID})
+			}
+		}
 		for _, relationship := range graph.bySource[candidate.ID] {
-			if !includesString(kinds, relationship.Kind) {
+			if relationship.Kind != RelationshipCalls || !includesString(kinds, relationship.Kind) {
 				continue
 			}
 			callee, ok := graph.chunksByID[relationship.ToChunkID]
 			if ok {
-				appendChunk(callee)
+				appendEvidence(EvidenceCandidate{Chunk: callee, Origin: EvidenceCallee, AnchorID: candidate.ID})
 			}
 		}
-		if len(selected) >= limit {
-			break
-		}
 	}
-	return selected, nil
+	return discovered, nil
 }
 
 func includesString(values []string, candidate string) bool {

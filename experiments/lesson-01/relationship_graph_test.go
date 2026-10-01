@@ -76,21 +76,33 @@ func (db *Database) UpdateUserEmail(id int, email string) {}
 		t.Fatalf("parent relationships = %#v, want %#v", parentRelationships, wantParentRelationships)
 	}
 
-	selected, err := graph.ExpandCalls([]CodeChunk{chunks[2], chunks[3]}, 5)
+	direct := []CodeSearchResult{
+		{Chunk: chunks[2], Score: 0.91},
+		{Chunk: chunks[3], Score: 0.82},
+	}
+	selected, err := graph.ExpandCalls(direct)
 	if err != nil {
 		t.Fatalf("ExpandCalls() error = %v", err)
 	}
 	gotNames := make([]string, len(selected))
 	for i, chunk := range selected {
-		gotNames[i] = chunk.Name
+		gotNames[i] = chunk.Chunk.Name
 	}
 	wantNames := []string{"UpdateEmail", "NormalizeToken", "UpdateUserEmail"}
 	if !reflect.DeepEqual(gotNames, wantNames) {
 		t.Fatalf("ExpandCalls() names = %#v, want %#v", gotNames, wantNames)
 	}
+	wantEvidence := []EvidenceCandidate{
+		{Chunk: chunks[2], Origin: EvidenceDirect, Score: 0.91},
+		{Chunk: chunks[3], Origin: EvidenceDirect, Score: 0.82},
+		{Chunk: chunks[6], Origin: EvidenceCallee, AnchorID: chunks[2].ID},
+	}
+	if !reflect.DeepEqual(selected, wantEvidence) {
+		t.Fatalf("ExpandCalls() evidence = %#v, want %#v", selected, wantEvidence)
+	}
 }
 
-func TestCodeRelationshipGraphExpandChildren(t *testing.T) {
+func TestCodeRelationshipGraphExpandParents(t *testing.T) {
 	root := t.TempDir()
 	source := `package example
 
@@ -132,34 +144,38 @@ func (db *Database) Close() {}
 	}
 	tests := []struct {
 		parent CodeChunk
-		want   []string
+		child  CodeChunk
 	}{
-		{parent: chunks[0], want: []string{"UserService", "GetUser", "UpdateEmail"}},
-		{parent: chunks[3], want: []string{"AuthService", "AuthenticateUser", "LogoutUser"}},
-		{parent: chunks[6], want: []string{"Database", "FindUser", "UpdateUserEmail", "ValidateToken", "RevokeSession", "Close"}},
+		{parent: chunks[0], child: chunks[1]},
+		{parent: chunks[3], child: chunks[4]},
+		{parent: chunks[6], child: chunks[7]},
 	}
 	for _, test := range tests {
-		got, err := graph.ExpandChildren([]CodeChunk{test.parent}, 10)
+		got, err := graph.ExpandParents([]CodeSearchResult{{Chunk: test.child, Score: 0.77}})
 		if err != nil {
-			t.Fatalf("ExpandChildren(%s) error = %v", test.parent.Name, err)
+			t.Fatalf("ExpandParents(%s) error = %v", test.child.Name, err)
 		}
-		gotNames := make([]string, len(got))
-		for i, chunk := range got {
-			gotNames[i] = chunk.Name
+		want := []EvidenceCandidate{
+			{Chunk: test.child, Origin: EvidenceDirect, Score: 0.77},
+			{Chunk: test.parent, Origin: EvidenceParent, AnchorID: test.child.ID},
 		}
-		if !reflect.DeepEqual(gotNames, test.want) {
-			t.Errorf("ExpandChildren(%s) = %#v, want %#v", test.parent.Name, gotNames, test.want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("ExpandParents(%s) = %#v, want %#v", test.child.Name, got, want)
 		}
+	}
+	// A directly retrieved struct does not automatically pull in every method.
+	got, err := graph.ExpandParents([]CodeSearchResult{{Chunk: chunks[0], Score: 0.9}})
+	if err != nil {
+		t.Fatalf("ExpandParents(struct) error = %v", err)
+	}
+	if want := []EvidenceCandidate{{Chunk: chunks[0], Origin: EvidenceDirect, Score: 0.9}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ExpandParents(struct) = %#v, want %#v", got, want)
 	}
 }
 
 func TestCodeRelationshipGraphExpandCallsValidation(t *testing.T) {
-	graph := &CodeRelationshipGraph{}
-	if _, err := graph.ExpandCalls(nil, 0); err == nil {
-		t.Fatal("ExpandCalls() error = nil, want invalid limit error")
-	}
 	var nilGraph *CodeRelationshipGraph
-	if _, err := nilGraph.ExpandCalls(nil, 1); err == nil {
+	if _, err := nilGraph.ExpandCalls(nil); err == nil {
 		t.Fatal("ExpandCalls() error = nil, want nil graph error")
 	}
 }
