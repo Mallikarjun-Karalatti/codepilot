@@ -116,6 +116,18 @@ func (indexer *CodeIndexer) IndexRepository(root string) (*CodeSearchEngine, err
 		chunks = append(chunks, fileChunks...)
 	}
 
+	if err := resolveCrossFileParentIDs(chunks); err != nil {
+		return nil, err
+	}
+
+	engine := &CodeSearchEngine{Embedder: indexer.Embedder}
+	if err := engine.Add(chunks); err != nil {
+		return nil, fmt.Errorf("embed repository chunks: %w", err)
+	}
+	return engine, nil
+}
+
+func resolveCrossFileParentIDs(chunks []CodeChunk) error {
 	structIDsByDir := make(map[string]map[string]int)
 	for _, chunk := range chunks {
 		if chunk.Kind != ChunkKindStruct {
@@ -134,7 +146,7 @@ func (indexer *CodeIndexer) IndexRepository(root string) (*CodeSearchEngine, err
 		dir := filepath.ToSlash(filepath.Dir(chunks[i].SourceFile))
 		parentID, ok := structIDsByDir[dir][chunks[i].ParentName]
 		if !ok {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"struct %q not found in package directory %q for method %q",
 				chunks[i].ParentName,
 				dir,
@@ -143,10 +155,5 @@ func (indexer *CodeIndexer) IndexRepository(root string) (*CodeSearchEngine, err
 		}
 		chunks[i].ParentID = parentID
 	}
-
-	engine := &CodeSearchEngine{Embedder: indexer.Embedder}
-	if err := engine.Add(chunks); err != nil {
-		return nil, fmt.Errorf("embed repository chunks: %w", err)
-	}
-	return engine, nil
+	return nil
 }

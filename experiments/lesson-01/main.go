@@ -356,15 +356,15 @@ func (c *Chunker) Chunk(text string) ([]Chunk, error) {
 }
 
 type CodeChunk struct {
-	ID         int
-	ParentID   int
-	Text       string
-	SourceFile string
-	StartLine  int
-	EndLine    int
-	Kind       string
-	Name       string
-	ParentName string
+	ID         int    `json:"id"`
+	ParentID   int    `json:"parent_id,omitempty"`
+	Text       string `json:"text"`
+	SourceFile string `json:"source_file"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	ParentName string `json:"parent_name,omitempty"`
 }
 
 const (
@@ -376,8 +376,8 @@ const (
 type CodeChunker struct{}
 
 type CodeDocument struct {
-	Chunk     CodeChunk
-	Embedding []float64
+	Chunk     CodeChunk `json:"chunk"`
+	Embedding []float64 `json:"embedding"`
 }
 
 type CodeSearchEngine struct {
@@ -856,57 +856,4 @@ func (c *CodeChunker) chunk(
 	}
 
 	return chunks, nil
-}
-
-func main() {
-	source := `
-package main
-
-type UserService struct {
-    DB   *Database
-    Name string
-}
-
-type Database struct {
-    URL string
-}
-`
-
-	fset := token.NewFileSet()
-
-	file, err := parser.ParseFile(
-		fset,
-		"example.go",
-		source,
-		0,
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	for _, decl := range file.Decls {
-		genDecl, ok := decl.(*ast.GenDecl)
-		if !ok {
-			continue
-		}
-
-		for _, spec := range genDecl.Specs {
-			typeSpec, ok := spec.(*ast.TypeSpec)
-			if !ok {
-				continue
-			}
-
-			structType, ok := typeSpec.Type.(*ast.StructType)
-			if !ok {
-				continue
-			}
-
-			fmt.Println("Struct:", typeSpec.Name.Name)
-
-			for _, field := range structType.Fields.List {
-				fmt.Printf("Field: %+v\n", field)
-				fmt.Printf("Field type: %T\n", field.Type)
-			}
-		}
-	}
 }
