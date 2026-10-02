@@ -115,7 +115,7 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 			t.Errorf("ExpandCallsAndParents(%q) error = %v", benchmarkCase.Question, err)
 			continue
 		}
-		selector := &EvidenceSelector{MaxChunks: evaluationK}
+		selector := &EvidenceSelector{MaxChunks: evaluationK, Policy: EvidencePolicyRequiredParent}
 		selectedChunks, err := selector.Select(structuralEvidence)
 		if err != nil {
 			t.Errorf("EvidenceSelector.Select(%q) error = %v", benchmarkCase.Question, err)

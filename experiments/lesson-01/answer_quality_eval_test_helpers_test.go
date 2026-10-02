@@ -37,5 +37,13 @@ func TestAssessAnswerDeterministicSignals(t *testing.T) {
 		if !got.Abstained {
 			t.Fatal("assessAnswer() marked explicit negative answer as not abstaining")
 		}
+		for _, answer := range []string{
+			"None of the provided functions send an email to the user.",
+			"There is no mention of password hash verification in the code.",
+		} {
+			if !assessAnswer(caseData, answer, nil, chunksByName).Abstained {
+				t.Errorf("assessAnswer(%q) marked a negative answer as not abstaining", answer)
+			}
+		}
 	})
 }

@@ -15,8 +15,12 @@ import (
 
 const answerEvaluationMaxTokens = 6000
 
-func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
+func TestRealAnswerQualityWithAndWithoutStructuralEvidence(t *testing.T) {
 	engine := realRetrievalEngine(t)
+	const (
+		evaluationK = 5
+		rrfK        = 60
+	)
 	embedder := engine.Embedder.(*EmbeddingClient)
 	chunks := make([]CodeChunk, len(engine.Documents))
 	chunksByName := make(map[string][]CodeChunk, len(engine.Documents))
@@ -35,15 +39,16 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 		t.Fatalf("BuildLexicalIndex() error = %v", err)
 	}
 	lexicalScorer := &LexicalScorer{Tokenizer: tokenizer, Index: lexicalIndex}
-	retriever := &HybridEvidenceRetriever{
+	baseRetriever := &HybridEvidenceRetriever{
 		SemanticSearch: engine,
 		LexicalScorer:  lexicalScorer,
 		Chunks:         chunks,
-		Graph:          graph,
-		Selector:       &EvidenceSelector{MaxChunks: 5, Policy: EvidencePolicyDirectFirst},
-		CandidateLimit: 5,
-		RRFK:           60,
+		Selector:       &EvidenceSelector{MaxChunks: evaluationK, Policy: EvidencePolicyDirectFirst},
+		CandidateLimit: evaluationK,
+		RRFK:           rrfK,
 	}
+	structuralRetriever := *baseRetriever
+	structuralRetriever.Graph = graph
 	tokenCounter := &answerEvalTokenCounter{counter: embedder, counts: make(map[string]int)}
 	contextBuilder := &ContextBuilder{
 		Documents: chunks,
@@ -54,11 +59,9 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 	llm := NewLLMClient("http://localhost:11434", "qwen3:8b")
 	llm.Options = map[string]any{"temperature": 0.0}
 	llm.HTTPClient = &http.Client{Timeout: 5 * time.Minute}
+	hybridAssistant := &CodeAssistant{Retriever: baseRetriever, ContextBuilder: contextBuilder, Formatter: formatter, LLM: llm}
+	directFirstAssistant := &CodeAssistant{Retriever: &structuralRetriever, ContextBuilder: contextBuilder, Formatter: formatter, LLM: llm}
 
-	const (
-		evaluationK = 5
-		rrfK        = 60
-	)
 	evaluationCases := retrievalBenchmarkCases()
 	startIndex := 0
 	if value := os.Getenv("CODEPILOT_ANSWER_EVAL_START"); value != "" {
@@ -81,67 +84,15 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 	t.Logf("Running answer-quality cases %d-%d of the %d-query benchmark", startIndex+1, startIndex+len(evaluationCases), len(retrievalBenchmarkCases()))
 	failedPairs := 0
 	for _, benchmarkCase := range evaluationCases {
-		semantic, err := engine.Search(benchmarkCase.Question, evaluationK)
+		hybridAnswer, hybridEvidence, err := hybridAssistant.AskWithEvidence(benchmarkCase.Question)
 		if err != nil {
-			t.Errorf("semantic Search(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			t.Errorf("CodeAssistant.AskWithEvidence(Hybrid, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
 			failedPairs++
 			continue
 		}
-		lexicalRanked, err := rankLexically(lexicalScorer, benchmarkCase.Question, chunks)
+		directFirstAnswer, directFirstEvidence, err := directFirstAssistant.AskWithEvidence(benchmarkCase.Question)
 		if err != nil {
-			t.Errorf("rankLexically(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		lexical := takeCodeSearchResults(asCodeSearchResults(lexicalRanked), evaluationK)
-		hybrid, err := ReciprocalRankFusion(semantic, lexical, rrfK)
-		if err != nil {
-			t.Errorf("ReciprocalRankFusion(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		hybridResults := takeCodeSearchResults(hybridAsCodeSearchResults(hybrid), evaluationK)
-
-		// Arm A: hybrid direct results pass straight into the shared context builder.
-		hybridContextChunks, err := contextBuilder.Build(hybridResults)
-		if err != nil {
-			t.Errorf("ContextBuilder.Build(Hybrid, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		hybridContext := formatter.Format(hybridContextChunks)
-
-		// Arm B: the same hybrid results pass through graph discovery and the
-		// already-measured Direct-First selector before the same context builder.
-		evidence, err := retriever.SelectHybrid(hybridResults)
-		if err != nil {
-			t.Errorf("HybridEvidenceRetriever.SelectHybrid(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		directFirstEvidence, err := contextBuilder.BuildEvidence(evidence)
-		if err != nil {
-			t.Errorf("ContextBuilder.BuildEvidence(Direct-First, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		directFirstContextChunks := make([]CodeChunk, len(directFirstEvidence))
-		for i, candidate := range directFirstEvidence {
-			directFirstContextChunks[i] = candidate.Chunk
-		}
-		directFirstContext := formatter.FormatEvidence(directFirstEvidence)
-
-		// Both arms use the same prompt constructor, one-message request, model,
-		// HTTP client settings, token budget, and query. There is no chat history.
-		hybridAnswer, err := llm.Chat([]Message{{Role: "user", Content: buildPrompt(benchmarkCase.Question, hybridContext)}})
-		if err != nil {
-			t.Errorf("LLM.Chat(Hybrid, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
-		}
-		directFirstAnswer, err := llm.Chat([]Message{{Role: "user", Content: buildPrompt(benchmarkCase.Question, directFirstContext)}})
-		if err != nil {
-			t.Errorf("LLM.Chat(Direct-First, %q) error = %v; answer pair is incomplete", benchmarkCase.Question, err)
+			t.Errorf("CodeAssistant.AskWithEvidence(Direct-First, %q) error = %v; answer pair is incomplete", benchmarkCase.Question, err)
 			failedPairs++
 			continue
 		}
@@ -151,6 +102,8 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 			continue
 		}
 
+		hybridContextChunks := evidenceChunks(hybridEvidence)
+		directFirstContextChunks := evidenceChunks(directFirstEvidence)
 		hybridEval := assessAnswer(benchmarkCase, hybridAnswer, hybridContextChunks, chunksByName)
 		directFirstEval := assessAnswer(benchmarkCase, directFirstAnswer, directFirstContextChunks, chunksByName)
 		t.Logf("\n[%s] Question: %s", benchmarkCase.Category, benchmarkCase.Question)
@@ -166,6 +119,14 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 	if failedPairs > 0 {
 		t.Errorf("answer-quality run had %d failed or incomplete pairs", failedPairs)
 	}
+}
+
+func evidenceChunks(evidence []EvidenceCandidate) []CodeChunk {
+	chunks := make([]CodeChunk, len(evidence))
+	for i, candidate := range evidence {
+		chunks[i] = candidate.Chunk
+	}
+	return chunks
 }
 
 type answerEvalTokenCounter struct {
@@ -262,6 +223,7 @@ func containsAbstentionPhrase(answer string) bool {
 	for _, phrase := range []string{
 		"not present", "not implemented", "does not exist", "doesn't exist", "does not contain", "doesn't contain", "does not include", "doesn't include", "does not mention", "doesn't mention", "not verified in the given code",
 		"couldn't find", "cannot find", "not found", "no code", "isn't implemented",
+		"none of the provided", "none of the code", "no mention of", "there is no mention",
 	} {
 		if strings.Contains(answer, phrase) {
 			return true

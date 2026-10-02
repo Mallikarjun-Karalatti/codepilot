@@ -458,48 +458,62 @@ func buildPrompt(question, context string) string {
 }
 
 func (assistant *CodeAssistant) Ask(question string) (string, error) {
+	answer, _, err := assistant.AskWithEvidence(question)
+	return answer, err
+}
+
+// AskWithEvidence runs the same assistant flow as Ask and returns the evidence
+// used to produce the answer for callers that need to inspect its sources.
+func (assistant *CodeAssistant) AskWithEvidence(question string) (string, []EvidenceCandidate, error) {
+	answer, evidence, _, err := assistant.askWithContext(question)
+	return answer, evidence, err
+}
+
+// askWithContext is shared by Ask and the answer-quality evaluator so the
+// evaluator can inspect the exact evidence and prompt context used in an answer.
+func (assistant *CodeAssistant) askWithContext(question string) (string, []EvidenceCandidate, string, error) {
 	if assistant == nil {
-		return "", fmt.Errorf("code assistant must not be nil")
+		return "", nil, "", fmt.Errorf("code assistant must not be nil")
 	}
 	if strings.TrimSpace(question) == "" {
-		return "", fmt.Errorf("question must not be empty")
+		return "", nil, "", fmt.Errorf("question must not be empty")
 	}
 	if assistant.Retriever == nil {
-		return "", fmt.Errorf("hybrid evidence retriever must not be nil")
+		return "", nil, "", fmt.Errorf("hybrid evidence retriever must not be nil")
 	}
 	if assistant.ContextBuilder == nil {
-		return "", fmt.Errorf("context builder must not be nil")
+		return "", nil, "", fmt.Errorf("context builder must not be nil")
 	}
 	if assistant.Formatter == nil {
-		return "", fmt.Errorf("context formatter must not be nil")
+		return "", nil, "", fmt.Errorf("context formatter must not be nil")
 	}
 	if assistant.LLM == nil {
-		return "", fmt.Errorf("LLM client must not be nil")
+		return "", nil, "", fmt.Errorf("LLM client must not be nil")
 	}
 
 	evidence, err := assistant.Retriever.Retrieve(question)
 	if err != nil {
-		return "", fmt.Errorf("retrieve code evidence: %w", err)
+		return "", nil, "", fmt.Errorf("retrieve code evidence: %w", err)
 	}
 	if len(evidence) == 0 {
-		return "I couldn't find relevant code for that question.", nil
+		return "I couldn't find relevant code for that question.", evidence, "", nil
 	}
 
 	evidence, err = assistant.ContextBuilder.BuildEvidence(evidence)
 	if err != nil {
-		return "", fmt.Errorf("build code context: %w", err)
+		return "", nil, "", fmt.Errorf("build code context: %w", err)
 	}
 	if len(evidence) == 0 {
-		return "I couldn't find relevant code for that question.", nil
+		return "I couldn't find relevant code for that question.", evidence, "", nil
 	}
 
 	formattedContext := assistant.Formatter.FormatEvidence(evidence)
 	answer, err := assistant.LLM.Chat([]Message{{Role: "user", Content: buildPrompt(question, formattedContext)}})
 	if err != nil {
-		return "", fmt.Errorf("ask LLM: %w", err)
+		return "", evidence, formattedContext, fmt.Errorf("ask LLM: %w", err)
 	}
 
-	return answer, nil
+	return answer, evidence, formattedContext, nil
 }
 
 type TokenCounter interface {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,7 @@ func TestEvidenceSelectorRespectsBudgetAndRequiredParents(t *testing.T) {
 		{Chunk: callee, Origin: EvidenceCallee, AnchorID: method.ID},
 	}
 
-	got, err := (&EvidenceSelector{MaxChunks: 2}).Select(candidates)
+	got, err := (&EvidenceSelector{MaxChunks: 2, Policy: EvidencePolicyRequiredParent}).Select(candidates)
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
@@ -26,7 +27,7 @@ func TestEvidenceSelectorRespectsBudgetAndRequiredParents(t *testing.T) {
 		t.Fatalf("Select() = %#v, want required method-parent evidence %#v", got, want)
 	}
 
-	got, err = (&EvidenceSelector{MaxChunks: 3}).Select(candidates)
+	got, err = (&EvidenceSelector{MaxChunks: 3, Policy: EvidencePolicyRequiredParent}).Select(candidates)
 	if err != nil {
 		t.Fatalf("Select() with room for another direct hit error = %v", err)
 	}
@@ -35,7 +36,7 @@ func TestEvidenceSelectorRespectsBudgetAndRequiredParents(t *testing.T) {
 		t.Fatalf("Select() = %#v, want direct evidence before optional callee %#v", got, want)
 	}
 
-	got, err = (&EvidenceSelector{MaxChunks: 4}).Select(candidates)
+	got, err = (&EvidenceSelector{MaxChunks: 4, Policy: EvidencePolicyRequiredParent}).Select(candidates)
 	if err != nil {
 		t.Fatalf("Select() with room for callee error = %v", err)
 	}
@@ -55,7 +56,7 @@ func TestEvidenceSelectorSkipsMethodWhenRequiredParentCannotFit(t *testing.T) {
 		{Chunk: function, Origin: EvidenceDirect, Score: 0.8},
 	}
 
-	got, err := (&EvidenceSelector{MaxChunks: 1}).Select(candidates)
+	got, err := (&EvidenceSelector{MaxChunks: 1, Policy: EvidencePolicyRequiredParent}).Select(candidates)
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
@@ -73,7 +74,7 @@ func TestEvidenceSelectorDeduplicatesDirectParentAndDependency(t *testing.T) {
 		{Chunk: parent, Origin: EvidenceParent, AnchorID: method.ID},
 	}
 
-	got, err := (&EvidenceSelector{MaxChunks: 2}).Select(candidates)
+	got, err := (&EvidenceSelector{MaxChunks: 2, Policy: EvidencePolicyRequiredParent}).Select(candidates)
 	if err != nil {
 		t.Fatalf("Select() error = %v", err)
 	}
@@ -84,7 +85,7 @@ func TestEvidenceSelectorDeduplicatesDirectParentAndDependency(t *testing.T) {
 
 func TestEvidenceSelectorRequiresParentEvidence(t *testing.T) {
 	method := CodeChunk{ID: 2, ParentID: 1, Kind: ChunkKindMethod, Name: "AuthenticateUser"}
-	_, err := (&EvidenceSelector{MaxChunks: 2}).Select([]EvidenceCandidate{{Chunk: method, Origin: EvidenceDirect}})
+	_, err := (&EvidenceSelector{MaxChunks: 2, Policy: EvidencePolicyRequiredParent}).Select([]EvidenceCandidate{{Chunk: method, Origin: EvidenceDirect}})
 	if err == nil {
 		t.Fatal("Select() error = nil, want missing required parent error")
 	}
@@ -97,6 +98,12 @@ func TestEvidenceSelectorValidatesBudget(t *testing.T) {
 	var nilSelector *EvidenceSelector
 	if _, err := nilSelector.Select(nil); err == nil {
 		t.Fatal("Select() error = nil, want nil selector error")
+	}
+}
+
+func TestEvidenceSelectorRequiresExplicitPolicy(t *testing.T) {
+	if _, err := (&EvidenceSelector{MaxChunks: 3}).Select(nil); err == nil || !strings.Contains(err.Error(), "policy must be specified") {
+		t.Fatalf("Select() error = %v, want explicit policy error", err)
 	}
 }
 

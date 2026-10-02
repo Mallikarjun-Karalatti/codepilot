@@ -14,8 +14,7 @@ type EvidenceSelector struct {
 	Policy    EvidenceSelectionPolicy
 }
 
-// Select applies the configured evidence policy. The empty policy defaults to
-// required-parent selection for backwards compatibility.
+// Select applies the explicitly configured evidence policy.
 func (selector *EvidenceSelector) Select(candidates []EvidenceCandidate) ([]CodeChunk, error) {
 	evidence, err := selector.SelectEvidence(candidates)
 	if err != nil {
@@ -39,7 +38,7 @@ func (selector *EvidenceSelector) SelectEvidence(candidates []EvidenceCandidate)
 	}
 	policy := selector.Policy
 	if policy == "" {
-		policy = EvidencePolicyRequiredParent
+		return nil, fmt.Errorf("evidence selection policy must be specified")
 	}
 	if policy != EvidencePolicyRequiredParent && policy != EvidencePolicyDirectFirst {
 		return nil, fmt.Errorf("unsupported evidence selection policy %q", policy)
