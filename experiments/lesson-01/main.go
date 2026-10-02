@@ -427,7 +427,7 @@ type CodeAssistant struct {
 
 func buildPrompt(question, context string) string {
 	return fmt.Sprintf(
-		"Answer the question using the code context below. If the context does not contain the answer, say so.\n\nCode context:\n%s\n\nQuestion: %s",
+		"Answer the question using only the code context below. Return the response in exactly this format:\n\nAnswer:\n<your answer>\n\nSources:\n- <source file>:<start line>-<end line> — <function, method, or type name>\n\nCite the context entries that support the important claims in your answer. Copy each source file, line range, and name from the provided context; never invent or infer a source reference. List each source once. If the context does not contain enough information to answer, state that in the Answer section and write `- None` under Sources.\n\nCode context:\n%s\n\nQuestion: %s",
 		context,
 		question,
 	)

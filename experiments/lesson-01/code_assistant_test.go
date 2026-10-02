@@ -78,7 +78,7 @@ func successfulAssistantHTTPClient() *assistantTestHTTPClient {
 	return &assistantTestHTTPClient{
 		response: &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"message":{"content":"The code is in AuthenticateUser."}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"message":{"content":"Answer:\nAuthentication is handled by AuthenticateUser.\n\nSources:\n- auth.go:3-3 — AuthenticateUser"}}`)),
 		},
 	}
 }
@@ -211,6 +211,9 @@ func TestCodeAssistantAsk(t *testing.T) {
 		for _, expected := range []string{
 			"[FUNCTION: AuthenticateUser]",
 			"Source: auth.go:3-3",
+			"Return the response in exactly this format:",
+			"Sources:",
+			"never invent or infer a source reference",
 			chunk.Text,
 			question,
 		} {
@@ -235,7 +238,8 @@ func TestCodeAssistantAsk(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Ask() error = %v", err)
 		}
-		if answer != "The code is in AuthenticateUser." {
+		want := "Answer:\nAuthentication is handled by AuthenticateUser.\n\nSources:\n- auth.go:3-3 — AuthenticateUser"
+		if answer != want {
 			t.Errorf("Ask() = %q, want expected answer", answer)
 		}
 	})
@@ -243,7 +247,7 @@ func TestCodeAssistantAsk(t *testing.T) {
 
 func TestBuildPrompt(t *testing.T) {
 	got := buildPrompt("Where is auth handled?", "[FUNCTION: AuthenticateUser]")
-	want := "Answer the question using the code context below. If the context does not contain the answer, say so.\n\nCode context:\n[FUNCTION: AuthenticateUser]\n\nQuestion: Where is auth handled?"
+	want := "Answer the question using only the code context below. Return the response in exactly this format:\n\nAnswer:\n<your answer>\n\nSources:\n- <source file>:<start line>-<end line> — <function, method, or type name>\n\nCite the context entries that support the important claims in your answer. Copy each source file, line range, and name from the provided context; never invent or infer a source reference. List each source once. If the context does not contain enough information to answer, state that in the Answer section and write `- None` under Sources.\n\nCode context:\n[FUNCTION: AuthenticateUser]\n\nQuestion: Where is auth handled?"
 	if got != want {
 		t.Errorf("buildPrompt() = %q, want %q", got, want)
 	}
