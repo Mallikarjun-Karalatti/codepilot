@@ -20,9 +20,10 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Options  map[string]any `json:"options,omitempty"`
 }
 
 type ChatResponse struct {
@@ -39,6 +40,7 @@ type EmbedRequest struct {
 type LLMClient struct {
 	BaseURL    string
 	Model      string
+	Options    map[string]any
 	HTTPClient HTTPClient
 }
 
@@ -116,6 +118,7 @@ func (client *LLMClient) Chat(messages []Message) (string, error) {
 		Model:    client.Model,
 		Messages: messages,
 		Stream:   false,
+		Options:  client.Options,
 	}
 
 	data, err := json.Marshal(requestBody)

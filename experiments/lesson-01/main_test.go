@@ -124,6 +124,9 @@ func TestChat_HTTP(t *testing.T) {
 			if requestBody.Model != "qwen3:8b" {
 				t.Errorf("expected model qwen3:8b, got %s", requestBody.Model)
 			}
+			if requestBody.Options["temperature"] != float64(0) || requestBody.Options["num_predict"] != float64(64) {
+				t.Errorf("request options = %v, want temperature=0 and num_predict=64", requestBody.Options)
+			}
 
 			if len(requestBody.Messages) != 1 {
 				t.Fatalf("expected 1 message, got %d", len(requestBody.Messages))
@@ -159,6 +162,7 @@ func TestChat_HTTP(t *testing.T) {
 	defer server.Close()
 
 	client := NewLLMClient(server.URL, "qwen3:8b")
+	client.Options = map[string]any{"temperature": 0.0, "num_predict": 64}
 	messages := []Message{
 		{Role: "user", Content: "What is the capital of France?"},
 	}

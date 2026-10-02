@@ -3,6 +3,12 @@ package main
 import "testing"
 
 func TestAssessAnswerDeterministicSignals(t *testing.T) {
+	if containsIdentifier("UserService.GetUser", "User") {
+		t.Fatal("containsIdentifier() matched User inside UserService")
+	}
+	if !containsIdentifier("The User struct is returned", "User") {
+		t.Fatal("containsIdentifier() did not match standalone User identifier")
+	}
 	chunksByName := map[string][]CodeChunk{
 		"AuthenticateUser": {{Name: "AuthenticateUser", SourceFile: "auth.go"}},
 		"ValidateToken":    {{Name: "ValidateToken", SourceFile: "database.go"}},

@@ -2,10 +2,15 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const answerEvaluationMaxTokens = 6000
@@ -38,31 +43,62 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 	}
 	formatter := &ContextFormatter{}
 	llm := NewLLMClient("http://localhost:11434", "qwen3:8b")
+	llm.Options = map[string]any{"temperature": 0.0}
+	llm.HTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
 	const (
 		evaluationK = 5
 		rrfK        = 60
 	)
-	for _, benchmarkCase := range retrievalBenchmarkCases() {
+	evaluationCases := retrievalBenchmarkCases()
+	startIndex := 0
+	if value := os.Getenv("CODEPILOT_ANSWER_EVAL_START"); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil || parsed < 0 || parsed > len(evaluationCases) {
+			t.Fatalf("CODEPILOT_ANSWER_EVAL_START=%q must be an integer from 0 through %d", value, len(evaluationCases))
+		}
+		startIndex = parsed
+	}
+	evaluationCases = evaluationCases[startIndex:]
+	if value := os.Getenv("CODEPILOT_ANSWER_EVAL_COUNT"); value != "" {
+		count, parseErr := strconv.Atoi(value)
+		if parseErr != nil || count < 0 {
+			t.Fatalf("CODEPILOT_ANSWER_EVAL_COUNT=%q must be a non-negative integer", value)
+		}
+		if count < len(evaluationCases) {
+			evaluationCases = evaluationCases[:count]
+		}
+	}
+	t.Logf("Running answer-quality cases %d-%d of the %d-query benchmark", startIndex+1, startIndex+len(evaluationCases), len(retrievalBenchmarkCases()))
+	failedPairs := 0
+	for _, benchmarkCase := range evaluationCases {
 		semantic, err := engine.Search(benchmarkCase.Question, evaluationK)
 		if err != nil {
-			t.Fatalf("semantic Search(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("semantic Search(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		lexicalRanked, err := rankLexically(lexicalScorer, benchmarkCase.Question, chunks)
 		if err != nil {
-			t.Fatalf("rankLexically(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("rankLexically(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		lexical := takeCodeSearchResults(asCodeSearchResults(lexicalRanked), evaluationK)
 		hybrid, err := ReciprocalRankFusion(semantic, lexical, rrfK)
 		if err != nil {
-			t.Fatalf("ReciprocalRankFusion(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("ReciprocalRankFusion(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		hybridResults := takeCodeSearchResults(hybridAsCodeSearchResults(hybrid), evaluationK)
 
 		// Arm A: hybrid direct results pass straight into the shared context builder.
 		hybridContextChunks, err := contextBuilder.Build(hybridResults)
 		if err != nil {
-			t.Fatalf("ContextBuilder.Build(Hybrid, %q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("ContextBuilder.Build(Hybrid, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		hybridContext := formatter.Format(hybridContextChunks)
 
@@ -70,19 +106,25 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 		// already-measured Direct-First selector before the same context builder.
 		evidence, err := graph.ExpandCallsAndParents(hybridResults)
 		if err != nil {
-			t.Fatalf("ExpandCallsAndParents(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("ExpandCallsAndParents(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		selected, err := (&EvidenceSelector{
 			MaxChunks: evaluationK,
 			Policy:    EvidencePolicyDirectFirst,
 		}).Select(evidence)
 		if err != nil {
-			t.Fatalf("EvidenceSelector.Select(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("EvidenceSelector.Select(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		directFirstResults := chunksAsCodeSearchResults(selected)
 		directFirstContextChunks, err := contextBuilder.Build(directFirstResults)
 		if err != nil {
-			t.Fatalf("ContextBuilder.Build(Direct-First, %q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("ContextBuilder.Build(Direct-First, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		directFirstContext := formatter.Format(directFirstContextChunks)
 
@@ -90,23 +132,36 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 		// HTTP client settings, token budget, and query. There is no chat history.
 		hybridAnswer, err := llm.Chat([]Message{{Role: "user", Content: buildPrompt(benchmarkCase.Question, hybridContext)}})
 		if err != nil {
-			t.Fatalf("LLM.Chat(Hybrid, %q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("LLM.Chat(Hybrid, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			failedPairs++
+			continue
 		}
 		directFirstAnswer, err := llm.Chat([]Message{{Role: "user", Content: buildPrompt(benchmarkCase.Question, directFirstContext)}})
 		if err != nil {
-			t.Fatalf("LLM.Chat(Direct-First, %q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("LLM.Chat(Direct-First, %q) error = %v; answer pair is incomplete", benchmarkCase.Question, err)
+			failedPairs++
+			continue
+		}
+		if strings.TrimSpace(hybridAnswer) == "" || strings.TrimSpace(directFirstAnswer) == "" {
+			t.Errorf("LLM returned an empty answer for %q; answer pair is incomplete", benchmarkCase.Question)
+			failedPairs++
+			continue
 		}
 
 		hybridEval := assessAnswer(benchmarkCase, hybridAnswer, hybridContextChunks, chunksByName)
 		directFirstEval := assessAnswer(benchmarkCase, directFirstAnswer, directFirstContextChunks, chunksByName)
 		t.Logf("\n[%s] Question: %s", benchmarkCase.Category, benchmarkCase.Question)
-		t.Logf("Settings: model=%s embedding=qwen3-embedding temperature=Ollama default MaxTokens=%d topK=%d RRF-k=%d", llm.Model, answerEvaluationMaxTokens, evaluationK, rrfK)
+		t.Logf("Settings: model=%s embedding=qwen3-embedding temperature=%.1f MaxTokens=%d topK=%d RRF-k=%d", llm.Model, llm.Options["temperature"], answerEvaluationMaxTokens, evaluationK, rrfK)
 		t.Logf("Hybrid context chunks: %s", chunkNames(hybridContextChunks))
 		t.Logf("Direct-First context chunks: %s", chunkNames(directFirstContextChunks))
 		t.Logf("Hybrid answer:\n%s", hybridAnswer)
 		t.Logf("Hybrid deterministic checks: %s", hybridEval.String())
 		t.Logf("Direct-First answer:\n%s", directFirstAnswer)
 		t.Logf("Direct-First deterministic checks: %s", directFirstEval.String())
+	}
+	t.Logf("Answer-quality run completed with %d failed or incomplete pairs out of %d selected questions", failedPairs, len(evaluationCases))
+	if failedPairs > 0 {
+		t.Errorf("answer-quality run had %d failed or incomplete pairs", failedPairs)
 	}
 }
 
@@ -150,7 +205,7 @@ func assessAnswer(testCase RetrievalBenchmarkCase, answer string, contextChunks 
 		Negative:      len(testCase.ExpectedNames) == 0,
 	}
 	for _, name := range testCase.ExpectedNames {
-		if !strings.Contains(answer, name) {
+		if !containsIdentifier(answer, name) {
 			continue
 		}
 		evaluation.ExpectedMentioned = append(evaluation.ExpectedMentioned, name)
@@ -165,7 +220,7 @@ func assessAnswer(testCase RetrievalBenchmarkCase, answer string, contextChunks 
 		}
 	}
 	for name := range chunksByName {
-		if strings.Contains(answer, name) {
+		if containsIdentifier(answer, name) {
 			if _, grounded := contextNames[name]; !grounded {
 				evaluation.UnsupportedNames = appendUnique(evaluation.UnsupportedNames, name)
 			}
@@ -173,6 +228,12 @@ func assessAnswer(testCase RetrievalBenchmarkCase, answer string, contextChunks 
 	}
 	evaluation.Abstained = containsAbstentionPhrase(lowerAnswer)
 	return evaluation
+}
+
+func containsIdentifier(text, identifier string) bool {
+	pattern := `(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(identifier) + `([^A-Za-z0-9_]|$)`
+	matched, _ := regexp.MatchString(pattern, text)
+	return matched
 }
 
 func (evaluation answerEval) String() string {
@@ -196,7 +257,7 @@ func (evaluation answerEval) String() string {
 
 func containsAbstentionPhrase(answer string) bool {
 	for _, phrase := range []string{
-		"not present", "not implemented", "does not exist", "doesn't exist",
+		"not present", "not implemented", "does not exist", "doesn't exist", "does not contain", "doesn't contain", "does not include", "doesn't include", "does not mention", "doesn't mention", "not verified in the given code",
 		"couldn't find", "cannot find", "not found", "no code", "isn't implemented",
 	} {
 		if strings.Contains(answer, phrase) {
