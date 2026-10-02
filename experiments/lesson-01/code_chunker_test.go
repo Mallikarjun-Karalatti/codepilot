@@ -260,6 +260,20 @@ func TestContextBuilderBuildEmptyResults(t *testing.T) {
 	}
 }
 
+func TestContextBuilderBuildEvidencePreservesProvenance(t *testing.T) {
+	chunk := CodeChunk{ID: 7, Text: "func FindUser() {}", SourceFile: "user.go", StartLine: 2, EndLine: 2, Name: "FindUser"}
+	want := EvidenceCandidate{Chunk: chunk, Origin: EvidenceCallee, AnchorID: 3, Score: 0}
+	builder := &ContextBuilder{Tokenizer: assistantTestTokenCounter{count: 1}, MaxTokens: 1}
+
+	got, err := builder.BuildEvidence([]EvidenceCandidate{want})
+	if err != nil {
+		t.Fatalf("BuildEvidence() error = %v", err)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("BuildEvidence() = %#v, want [%#v]", got, want)
+	}
+}
+
 func TestContextBuilderBuildMissingParent(t *testing.T) {
 	method := CodeChunk{ID: 2, ParentID: 1, Kind: ChunkKindMethod, Name: "GetUser"}
 	builder := &ContextBuilder{Tokenizer: mapTokenCounter{}, MaxTokens: 10}

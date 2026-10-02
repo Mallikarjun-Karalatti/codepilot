@@ -81,6 +81,13 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 		evaluationK = 5
 		rrfK        = 60
 	)
+	directFirstRetriever := &HybridEvidenceRetriever{
+		SemanticSearch: engine,
+		LexicalScorer:  lexicalScorer,
+		Chunks:         chunks,
+		Graph:          relationshipGraph,
+		Selector:       &EvidenceSelector{MaxChunks: evaluationK, Policy: EvidencePolicyDirectFirst},
+	}
 	answerableCount := 0
 	negativeCount := 0
 	var semanticTotals, lexicalTotals, hybridTotals, selectedTotals, directFirstTotals benchmarkTotals
@@ -115,13 +122,17 @@ func TestRealRetrievalBenchmark(t *testing.T) {
 			continue
 		}
 		selectedResults := chunksAsCodeSearchResults(selectedChunks)
-		directFirstSelector := &EvidenceSelector{MaxChunks: evaluationK, Policy: EvidencePolicyDirectFirst}
-		directFirstChunks, err := directFirstSelector.Select(structuralEvidence)
+		directFirstEvidence, err := directFirstRetriever.SelectHybrid(hybridResults)
 		if err != nil {
-			t.Errorf("DirectFirstSelector.Select(%q) error = %v", benchmarkCase.Question, err)
+			t.Errorf("HybridEvidenceRetriever.Retrieve(%q) error = %v", benchmarkCase.Question, err)
 			continue
 		}
-		directFirstResults := chunksAsCodeSearchResults(directFirstChunks)
+		directFirstChunks := make([]CodeChunk, len(directFirstEvidence))
+		directFirstResults := make([]CodeSearchResult, len(directFirstEvidence))
+		for i, candidate := range directFirstEvidence {
+			directFirstChunks[i] = candidate.Chunk
+			directFirstResults[i] = CodeSearchResult{Chunk: candidate.Chunk, Score: candidate.Score}
+		}
 
 		t.Logf("[%s] %s", benchmarkCase.Category, benchmarkCase.Question)
 		if len(benchmarkCase.ExpectedNames) == 0 {

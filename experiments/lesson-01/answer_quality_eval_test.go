@@ -35,6 +35,15 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 		t.Fatalf("BuildLexicalIndex() error = %v", err)
 	}
 	lexicalScorer := &LexicalScorer{Tokenizer: tokenizer, Index: lexicalIndex}
+	retriever := &HybridEvidenceRetriever{
+		SemanticSearch: engine,
+		LexicalScorer:  lexicalScorer,
+		Chunks:         chunks,
+		Graph:          graph,
+		Selector:       &EvidenceSelector{MaxChunks: 5, Policy: EvidencePolicyDirectFirst},
+		CandidateLimit: 5,
+		RRFK:           60,
+	}
 	tokenCounter := &answerEvalTokenCounter{counter: embedder, counts: make(map[string]int)}
 	contextBuilder := &ContextBuilder{
 		Documents: chunks,
@@ -104,29 +113,23 @@ func TestRealAnswerQualityHybridVsDirectFirst(t *testing.T) {
 
 		// Arm B: the same hybrid results pass through graph discovery and the
 		// already-measured Direct-First selector before the same context builder.
-		evidence, err := graph.ExpandCallsAndParents(hybridResults)
+		evidence, err := retriever.SelectHybrid(hybridResults)
 		if err != nil {
-			t.Errorf("ExpandCallsAndParents(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			t.Errorf("HybridEvidenceRetriever.SelectHybrid(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
 			failedPairs++
 			continue
 		}
-		selected, err := (&EvidenceSelector{
-			MaxChunks: evaluationK,
-			Policy:    EvidencePolicyDirectFirst,
-		}).Select(evidence)
+		directFirstEvidence, err := contextBuilder.BuildEvidence(evidence)
 		if err != nil {
-			t.Errorf("EvidenceSelector.Select(%q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
+			t.Errorf("ContextBuilder.BuildEvidence(Direct-First, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
 			failedPairs++
 			continue
 		}
-		directFirstResults := chunksAsCodeSearchResults(selected)
-		directFirstContextChunks, err := contextBuilder.Build(directFirstResults)
-		if err != nil {
-			t.Errorf("ContextBuilder.Build(Direct-First, %q) error = %v; skipping this answer pair", benchmarkCase.Question, err)
-			failedPairs++
-			continue
+		directFirstContextChunks := make([]CodeChunk, len(directFirstEvidence))
+		for i, candidate := range directFirstEvidence {
+			directFirstContextChunks[i] = candidate.Chunk
 		}
-		directFirstContext := formatter.Format(directFirstContextChunks)
+		directFirstContext := formatter.FormatEvidence(directFirstEvidence)
 
 		// Both arms use the same prompt constructor, one-message request, model,
 		// HTTP client settings, token budget, and query. There is no chat history.

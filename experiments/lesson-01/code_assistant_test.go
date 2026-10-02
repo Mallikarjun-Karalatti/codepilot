@@ -53,16 +53,29 @@ func (counter assistantTestTokenCounter) CountTokens(string) (int, error) {
 	return counter.count, nil
 }
 
+type errorAssistantTestTokenCounter struct{ err error }
+
+func (counter errorAssistantTestTokenCounter) CountTokens(string) (int, error) { return 0, counter.err }
+
 func newAssistantTestAssistant(chunks []CodeChunk, llmHTTP HTTPClient, embedErr error) *CodeAssistant {
 	documents := make([]CodeDocument, len(chunks))
 	for i, chunk := range chunks {
 		documents[i] = CodeDocument{Chunk: chunk, Embedding: []float64{1, 0}}
 	}
+	tokenizer := CodeAwareTokenizer{}
+	lexicalIndex, _ := BuildLexicalIndex(chunks, tokenizer)
+	searchEngine := &CodeSearchEngine{
+		Embedder:  assistantTestEmbedder{embedding: []float64{1, 0}, err: embedErr},
+		Documents: documents,
+	}
 
 	return &CodeAssistant{
-		SearchEngine: &CodeSearchEngine{
-			Embedder:  assistantTestEmbedder{embedding: []float64{1, 0}, err: embedErr},
-			Documents: documents,
+		Retriever: &HybridEvidenceRetriever{
+			SemanticSearch: searchEngine,
+			LexicalScorer:  &LexicalScorer{Tokenizer: tokenizer, Index: lexicalIndex},
+			Chunks:         chunks,
+			Selector:       &EvidenceSelector{MaxChunks: 5, Policy: EvidencePolicyDirectFirst},
+			CandidateLimit: 5,
 		},
 		ContextBuilder: &ContextBuilder{
 			Documents: chunks,
@@ -109,36 +122,32 @@ func TestCodeAssistantAsk(t *testing.T) {
 		}
 	})
 
-	t.Run("missing SearchEngine returns error", func(t *testing.T) {
+	t.Run("missing retriever returns error", func(t *testing.T) {
 		assistant := &CodeAssistant{}
-		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "search engine") {
-			t.Errorf("Ask() error = %v, want missing SearchEngine error", err)
+		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "retriever") {
+			t.Errorf("Ask() error = %v, want missing retriever error", err)
 		}
 	})
 
 	t.Run("missing ContextBuilder returns error", func(t *testing.T) {
-		assistant := &CodeAssistant{SearchEngine: &CodeSearchEngine{}}
+		assistant := newAssistantTestAssistant([]CodeChunk{chunk}, successfulAssistantHTTPClient(), nil)
+		assistant.ContextBuilder = nil
 		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "context builder") {
 			t.Errorf("Ask() error = %v, want missing ContextBuilder error", err)
 		}
 	})
 
 	t.Run("missing Formatter returns error", func(t *testing.T) {
-		assistant := &CodeAssistant{
-			SearchEngine:   &CodeSearchEngine{},
-			ContextBuilder: &ContextBuilder{},
-		}
+		assistant := newAssistantTestAssistant([]CodeChunk{chunk}, successfulAssistantHTTPClient(), nil)
+		assistant.Formatter = nil
 		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "formatter") {
 			t.Errorf("Ask() error = %v, want missing Formatter error", err)
 		}
 	})
 
 	t.Run("missing LLM returns error", func(t *testing.T) {
-		assistant := &CodeAssistant{
-			SearchEngine:   &CodeSearchEngine{},
-			ContextBuilder: &ContextBuilder{},
-			Formatter:      &ContextFormatter{},
-		}
+		assistant := newAssistantTestAssistant([]CodeChunk{chunk}, successfulAssistantHTTPClient(), nil)
+		assistant.LLM = nil
 		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "LLM client") {
 			t.Errorf("Ask() error = %v, want missing LLM error", err)
 		}
@@ -168,12 +177,10 @@ func TestCodeAssistantAsk(t *testing.T) {
 	})
 
 	t.Run("context failure preserves cause", func(t *testing.T) {
-		method := chunk
-		method.Kind = ChunkKindMethod
-		method.ParentID = 404
-		assistant := newAssistantTestAssistant([]CodeChunk{method}, successfulAssistantHTTPClient(), nil)
-		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "parent chunk 404") {
-			t.Errorf("Ask() error = %v, want missing parent context error", err)
+		assistant := newAssistantTestAssistant([]CodeChunk{chunk}, successfulAssistantHTTPClient(), nil)
+		assistant.ContextBuilder.Tokenizer = errorAssistantTestTokenCounter{err: errors.New("token counter failed")}
+		if _, err := assistant.Ask(question); err == nil || !strings.Contains(err.Error(), "token counter failed") {
+			t.Errorf("Ask() error = %v, want token counter error", err)
 		}
 	})
 
@@ -211,6 +218,7 @@ func TestCodeAssistantAsk(t *testing.T) {
 		for _, expected := range []string{
 			"[FUNCTION: AuthenticateUser]",
 			"Source: auth.go:3-3",
+			"Evidence: direct",
 			"Return the response in exactly this format:",
 			"Sources:",
 			"never invent or infer a source reference",

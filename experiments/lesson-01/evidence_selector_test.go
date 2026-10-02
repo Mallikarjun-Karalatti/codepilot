@@ -129,3 +129,21 @@ func TestEvidenceSelectorDirectFirstFillsDirectHitsBeforeParents(t *testing.T) {
 		t.Fatalf("Select() = %#v, want parent before optional callee in leftover slot %#v", got, want)
 	}
 }
+
+func TestEvidenceSelectorSelectEvidencePreservesOriginAndAnchor(t *testing.T) {
+	method := CodeChunk{ID: 2, ParentID: 1, Kind: ChunkKindMethod, Name: "GetUser"}
+	parent := CodeChunk{ID: 1, Kind: ChunkKindStruct, Name: "UserService"}
+	candidates := []EvidenceCandidate{
+		{Chunk: method, Origin: EvidenceDirect, Score: 0.8},
+		{Chunk: parent, Origin: EvidenceParent, AnchorID: method.ID},
+	}
+
+	got, err := (&EvidenceSelector{MaxChunks: 2, Policy: EvidencePolicyDirectFirst}).SelectEvidence(candidates)
+	if err != nil {
+		t.Fatalf("SelectEvidence() error = %v", err)
+	}
+	want := candidates
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SelectEvidence() = %#v, want %#v", got, want)
+	}
+}

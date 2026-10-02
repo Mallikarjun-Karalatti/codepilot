@@ -38,10 +38,28 @@ func TestRealCodePilotQuery(t *testing.T) {
 		Tokenizer: embedder,
 		MaxTokens: 6000,
 	}
+	tokenizer := CodeAwareTokenizer{}
+	lexicalIndex, err := BuildLexicalIndex(chunks, tokenizer)
+	if err != nil {
+		t.Fatalf("BuildLexicalIndex() error = %v", err)
+	}
+	graph, err := BuildCodeRelationshipGraph("sample-project", chunks)
+	if err != nil {
+		t.Fatalf("BuildCodeRelationshipGraph() error = %v", err)
+	}
+	retriever := &HybridEvidenceRetriever{
+		SemanticSearch: engine,
+		LexicalScorer:  &LexicalScorer{Tokenizer: tokenizer, Index: lexicalIndex},
+		Chunks:         chunks,
+		Graph:          graph,
+		Selector:       &EvidenceSelector{MaxChunks: 5, Policy: EvidencePolicyDirectFirst},
+		CandidateLimit: 5,
+		RRFK:           60,
+	}
 	formatter := &ContextFormatter{}
 
 	assistant := &CodeAssistant{
-		SearchEngine:   engine,
+		Retriever:      retriever,
 		ContextBuilder: builder,
 		Formatter:      formatter,
 		LLM:            NewLLMClient("http://localhost:11434", "qwen3:8b"),
@@ -50,13 +68,13 @@ func TestRealCodePilotQuery(t *testing.T) {
 	for _, question := range questions {
 		t.Logf("\nQuestion:\n%s", question)
 
-		results, err := engine.Search(question, 5)
+		results, err := retriever.Retrieve(question)
 		if err != nil {
-			t.Fatalf("Search(%q) error = %v", question, err)
+			t.Fatalf("Retrieve(%q) error = %v", question, err)
 		}
 		t.Log("Top results:")
 		for i, result := range results {
-			t.Logf("%d. %.6f %s (%s)", i+1, result.Score, result.Chunk.Name, result.Chunk.SourceFile)
+			t.Logf("%d. %.6f %s [%s anchor=%d] (%s)", i+1, result.Score, result.Chunk.Name, result.Origin, result.AnchorID, result.Chunk.SourceFile)
 		}
 
 		answer, err := assistant.Ask(question)

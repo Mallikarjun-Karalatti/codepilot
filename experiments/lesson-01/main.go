@@ -405,21 +405,45 @@ func (formatter *ContextFormatter) Format(chunks []CodeChunk) string {
 
 	sections := make([]string, len(chunks))
 	for i, chunk := range chunks {
-		lines := []string{
-			fmt.Sprintf("[%s: %s]", strings.ToUpper(chunk.Kind), chunk.Name),
-			fmt.Sprintf("Source: %s:%d-%d", chunk.SourceFile, chunk.StartLine, chunk.EndLine),
-		}
-		if chunk.ParentName != "" {
-			lines = append(lines, "Parent: "+chunk.ParentName)
-		}
-		lines = append(lines, chunk.Text)
-		sections[i] = strings.Join(lines, "\n")
+		sections[i] = formatCodeChunk(chunk, nil)
 	}
 	return strings.Join(sections, "\n\n")
 }
 
+// FormatEvidence keeps retrieval provenance visible to the model alongside
+// each chunk's citation metadata.
+func (formatter *ContextFormatter) FormatEvidence(evidence []EvidenceCandidate) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+	sections := make([]string, len(evidence))
+	for i, candidate := range evidence {
+		sections[i] = formatCodeChunk(candidate.Chunk, &candidate)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func formatCodeChunk(chunk CodeChunk, evidence *EvidenceCandidate) string {
+	lines := []string{
+		fmt.Sprintf("[%s: %s]", strings.ToUpper(chunk.Kind), chunk.Name),
+		fmt.Sprintf("Source: %s:%d-%d", chunk.SourceFile, chunk.StartLine, chunk.EndLine),
+	}
+	if chunk.ParentName != "" {
+		lines = append(lines, "Parent: "+chunk.ParentName)
+	}
+	if evidence != nil {
+		provenance := fmt.Sprintf("Evidence: %s", evidence.Origin)
+		if evidence.AnchorID != 0 {
+			provenance += fmt.Sprintf(" (anchor chunk %d)", evidence.AnchorID)
+		}
+		lines = append(lines, provenance)
+	}
+	lines = append(lines, chunk.Text)
+	return strings.Join(lines, "\n")
+}
+
 type CodeAssistant struct {
-	SearchEngine   *CodeSearchEngine
+	Retriever      *HybridEvidenceRetriever
 	ContextBuilder *ContextBuilder
 	Formatter      *ContextFormatter
 	LLM            *LLMClient
@@ -440,8 +464,8 @@ func (assistant *CodeAssistant) Ask(question string) (string, error) {
 	if strings.TrimSpace(question) == "" {
 		return "", fmt.Errorf("question must not be empty")
 	}
-	if assistant.SearchEngine == nil {
-		return "", fmt.Errorf("code search engine must not be nil")
+	if assistant.Retriever == nil {
+		return "", fmt.Errorf("hybrid evidence retriever must not be nil")
 	}
 	if assistant.ContextBuilder == nil {
 		return "", fmt.Errorf("context builder must not be nil")
@@ -453,24 +477,23 @@ func (assistant *CodeAssistant) Ask(question string) (string, error) {
 		return "", fmt.Errorf("LLM client must not be nil")
 	}
 
-	const searchLimit = 5
-	results, err := assistant.SearchEngine.Search(question, searchLimit)
+	evidence, err := assistant.Retriever.Retrieve(question)
 	if err != nil {
-		return "", fmt.Errorf("search code: %w", err)
+		return "", fmt.Errorf("retrieve code evidence: %w", err)
 	}
-	if len(results) == 0 {
+	if len(evidence) == 0 {
 		return "I couldn't find relevant code for that question.", nil
 	}
 
-	chunks, err := assistant.ContextBuilder.Build(results)
+	evidence, err = assistant.ContextBuilder.BuildEvidence(evidence)
 	if err != nil {
 		return "", fmt.Errorf("build code context: %w", err)
 	}
-	if len(chunks) == 0 {
+	if len(evidence) == 0 {
 		return "I couldn't find relevant code for that question.", nil
 	}
 
-	formattedContext := assistant.Formatter.Format(chunks)
+	formattedContext := assistant.Formatter.FormatEvidence(evidence)
 	answer, err := assistant.LLM.Chat([]Message{{Role: "user", Content: buildPrompt(question, formattedContext)}})
 	if err != nil {
 		return "", fmt.Errorf("ask LLM: %w", err)
@@ -481,6 +504,45 @@ func (assistant *CodeAssistant) Ask(question string) (string, error) {
 
 type TokenCounter interface {
 	CountTokens(text string) (int, error)
+}
+
+// BuildEvidence enforces the context token budget without converting evidence
+// back to search results or discarding its retrieval provenance.
+func (builder *ContextBuilder) BuildEvidence(evidence []EvidenceCandidate) ([]EvidenceCandidate, error) {
+	if len(evidence) == 0 {
+		return []EvidenceCandidate{}, nil
+	}
+	if builder == nil {
+		return nil, fmt.Errorf("context builder must not be nil")
+	}
+	if builder.Tokenizer == nil {
+		return nil, fmt.Errorf("tokenizer must not be nil")
+	}
+	if builder.MaxTokens <= 0 {
+		return nil, fmt.Errorf("max tokens must be greater than 0")
+	}
+	selected := make([]EvidenceCandidate, 0, len(evidence))
+	seen := make(map[int]struct{}, len(evidence))
+	tokensUsed := 0
+	for _, candidate := range evidence {
+		if _, exists := seen[candidate.Chunk.ID]; exists {
+			continue
+		}
+		tokens, err := builder.Tokenizer.CountTokens(candidate.Chunk.Text)
+		if err != nil {
+			return nil, fmt.Errorf("count tokens for chunk %d: %w", candidate.Chunk.ID, err)
+		}
+		if tokens < 0 {
+			return nil, fmt.Errorf("token counter returned negative count for chunk %d", candidate.Chunk.ID)
+		}
+		if tokens > builder.MaxTokens-tokensUsed {
+			continue
+		}
+		selected = append(selected, candidate)
+		seen[candidate.Chunk.ID] = struct{}{}
+		tokensUsed += tokens
+	}
+	return selected, nil
 }
 
 func (builder *ContextBuilder) Build(results []CodeSearchResult) ([]CodeChunk, error) {

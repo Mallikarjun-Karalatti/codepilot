@@ -17,6 +17,20 @@ type EvidenceSelector struct {
 // Select applies the configured evidence policy. The empty policy defaults to
 // required-parent selection for backwards compatibility.
 func (selector *EvidenceSelector) Select(candidates []EvidenceCandidate) ([]CodeChunk, error) {
+	evidence, err := selector.SelectEvidence(candidates)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]CodeChunk, len(evidence))
+	for i, candidate := range evidence {
+		chunks[i] = candidate.Chunk
+	}
+	return chunks, nil
+}
+
+// SelectEvidence applies the configured selection policy while retaining the
+// retrieval provenance associated with each selected chunk.
+func (selector *EvidenceSelector) SelectEvidence(candidates []EvidenceCandidate) ([]EvidenceCandidate, error) {
 	if selector == nil {
 		return nil, fmt.Errorf("evidence selector must not be nil")
 	}
@@ -37,14 +51,14 @@ func (selector *EvidenceSelector) Select(candidates []EvidenceCandidate) ([]Code
 		chunksByID[candidate.Chunk.ID] = candidate.Chunk
 	}
 
-	selected := make([]CodeChunk, 0, selector.MaxChunks)
+	selected := make([]EvidenceCandidate, 0, selector.MaxChunks)
 	selectedIDs := make(map[int]struct{}, selector.MaxChunks)
-	appendChunk := func(chunk CodeChunk) {
-		if _, exists := selectedIDs[chunk.ID]; exists || len(selected) >= selector.MaxChunks {
+	appendCandidate := func(candidate EvidenceCandidate) {
+		if _, exists := selectedIDs[candidate.Chunk.ID]; exists || len(selected) >= selector.MaxChunks {
 			return
 		}
-		selectedIDs[chunk.ID] = struct{}{}
-		selected = append(selected, chunk)
+		selectedIDs[candidate.Chunk.ID] = struct{}{}
+		selected = append(selected, candidate)
 	}
 
 	appendDirect := func() error {
@@ -67,12 +81,19 @@ func (selector *EvidenceSelector) Select(candidates []EvidenceCandidate) ([]Code
 					if len(selected)+2 > selector.MaxChunks {
 						continue
 					}
-					appendChunk(candidate.Chunk)
-					appendChunk(parentChunk)
+					appendCandidate(candidate)
+					parentEvidence := EvidenceCandidate{Chunk: parentChunk, Origin: EvidenceParent, AnchorID: candidate.Chunk.ID}
+					for _, possibleParent := range candidates {
+						if possibleParent.Chunk.ID == parentChunk.ID && possibleParent.Origin == EvidenceParent {
+							parentEvidence = possibleParent
+							break
+						}
+					}
+					appendCandidate(parentEvidence)
 					continue
 				}
 			}
-			appendChunk(candidate.Chunk)
+			appendCandidate(candidate)
 		}
 		return nil
 	}
@@ -85,12 +106,12 @@ func (selector *EvidenceSelector) Select(candidates []EvidenceCandidate) ([]Code
 	// optional callees.
 	for _, candidate := range candidates {
 		if policy == EvidencePolicyDirectFirst && candidate.Origin == EvidenceParent {
-			appendChunk(candidate.Chunk)
+			appendCandidate(candidate)
 		}
 	}
 	for _, candidate := range candidates {
 		if candidate.Origin == EvidenceCallee {
-			appendChunk(candidate.Chunk)
+			appendCandidate(candidate)
 		}
 	}
 	return selected, nil
