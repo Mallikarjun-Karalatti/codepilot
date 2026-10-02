@@ -2,6 +2,7 @@ package sampleproject
 
 import "strings"
 
+// added a comment to test the relationship graph
 type AuthService struct {
 	DB *Database
 }
