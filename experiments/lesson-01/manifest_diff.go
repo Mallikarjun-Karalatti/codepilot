@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,7 +38,7 @@ type FileSnapshot struct {
 	ModTime time.Time
 }
 
-// ChangeSet classifies eligible files against the previous manifest.
+// ChangeSet classifies files based on comparisons between the filesystem and manifest.
 type ChangeSet struct {
 	Added       []string
 	Modified    []string
@@ -57,9 +56,6 @@ type FileHasher interface {
 type SHA256FileHasher struct{}
 
 func (h *SHA256FileHasher) HashFile(ctx context.Context, fullPath string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
 	file, err := os.Open(fullPath)
 	if err != nil {
 		return "", err
@@ -67,23 +63,8 @@ func (h *SHA256FileHasher) HashFile(ctx context.Context, fullPath string) (strin
 	defer file.Close()
 
 	hasher := sha256.New()
-	buf := make([]byte, 32*1024)
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n, readErr := file.Read(buf)
-		if n > 0 {
-			if _, err := hasher.Write(buf[:n]); err != nil {
-				return "", fmt.Errorf("hash %q: %w", fullPath, err)
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return "", fmt.Errorf("read %q for hashing: %w", fullPath, readErr)
-		}
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", fmt.Errorf("read %q for hashing: %w", fullPath, err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
@@ -98,7 +79,7 @@ type ChangeDetector struct {
 func (d *ChangeDetector) Detect(
 	ctx context.Context,
 	prevManifest *RepositoryManifest,
-	currentRepositoryID string,
+	repoID string,
 	currentConfigFingerprint string,
 	snapshots []FileSnapshot,
 ) (*ChangeSet, error) {
@@ -108,22 +89,20 @@ func (d *ChangeDetector) Detect(
 	if d.Hasher == nil {
 		return nil, fmt.Errorf("file hasher must not be nil")
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+
+	if prevManifest != nil && prevManifest.RepositoryID != "" && repoID != "" && prevManifest.RepositoryID != repoID {
+		return nil, fmt.Errorf("repository id mismatch: previous %q, current %q", prevManifest.RepositoryID, repoID)
 	}
 
-	changeSet := emptyChangeSet()
-
-	if prevManifest != nil && prevManifest.RepositoryID != "" && currentRepositoryID != "" &&
-		prevManifest.RepositoryID != currentRepositoryID {
-		return nil, fmt.Errorf(
-			"repository id mismatch: manifest %q vs current %q",
-			prevManifest.RepositoryID,
-			currentRepositoryID,
-		)
+	changeSet := &ChangeSet{
+		Added:       make([]string, 0),
+		Modified:    make([]string, 0),
+		Deleted:     make([]string, 0),
+		Unchanged:   make([]string, 0),
+		FullReindex: false,
 	}
 
-	// No previous index: every eligible file is added.
+	// Case 1: No previous manifest -> Clean-slate initial index (FullReindex: false)
 	if prevManifest == nil || len(prevManifest.Files) == 0 {
 		for _, snap := range snapshots {
 			changeSet.Added = append(changeSet.Added, snap.Path)
@@ -132,13 +111,12 @@ func (d *ChangeDetector) Detect(
 		return changeSet, nil
 	}
 
-	seenOnDisk := make(map[string]FileSnapshot, len(snapshots))
+	seenOnDisk := make(map[string]struct{}, len(snapshots))
 	for _, snap := range snapshots {
-		seenOnDisk[snap.Path] = snap
+		seenOnDisk[snap.Path] = struct{}{}
 	}
 
-	// Config fingerprint mismatch: indexed representations are invalid.
-	// Surviving paths are Modified (must be reprocessed), not Added+Deleted.
+	// Case 2: Config fingerprint mismatch -> Full re-index triggered
 	if prevManifest.IndexConfigFingerprint != currentConfigFingerprint {
 		changeSet.FullReindex = true
 		for _, snap := range snapshots {
@@ -153,25 +131,37 @@ func (d *ChangeDetector) Detect(
 				changeSet.Deleted = append(changeSet.Deleted, prevPath)
 			}
 		}
-		sortChangeSet(changeSet)
+		sort.Strings(changeSet.Added)
+		sort.Strings(changeSet.Modified)
+		sort.Strings(changeSet.Deleted)
 		return changeSet, nil
 	}
 
+	// Case 3: Incremental comparison
 	for _, snap := range snapshots {
 		manifestFile, exists := prevManifest.Files[snap.Path]
+
 		if !exists {
 			changeSet.Added = append(changeSet.Added, snap.Path)
 			continue
 		}
 
+		// Fast Path: Size and ModTime match exactly -> file was untouched
 		if snap.Size == manifestFile.Size && snap.ModTime.Equal(manifestFile.ModTime) {
 			changeSet.Unchanged = append(changeSet.Unchanged, snap.Path)
 			continue
 		}
 
-		currentHash, err := d.Hasher.HashFile(ctx, d.fullPath(snap.Path))
+		// Fallback: Verify cryptographic hash
+		fullPath := snap.Path
+		if d.RootDir != "" {
+			fullPath = filepath.Join(d.RootDir, filepath.FromSlash(snap.Path))
+		}
+
+		currentHash, err := d.Hasher.HashFile(ctx, fullPath)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+			if os.IsNotExist(err) {
+				// File vanished during traversal
 				changeSet.Deleted = append(changeSet.Deleted, snap.Path)
 				continue
 			}
@@ -179,41 +169,25 @@ func (d *ChangeDetector) Detect(
 		}
 
 		if currentHash == manifestFile.SHA256 {
+			// ModTime changed, but content remained identical
 			changeSet.Unchanged = append(changeSet.Unchanged, snap.Path)
 		} else {
 			changeSet.Modified = append(changeSet.Modified, snap.Path)
 		}
 	}
 
+	// Find deleted files (existed in previous manifest, missing from disk scan)
 	for prevPath := range prevManifest.Files {
 		if _, exists := seenOnDisk[prevPath]; !exists {
 			changeSet.Deleted = append(changeSet.Deleted, prevPath)
 		}
 	}
 
-	sortChangeSet(changeSet)
-	return changeSet, nil
-}
-
-func (d *ChangeDetector) fullPath(relative string) string {
-	if d.RootDir == "" {
-		return relative
-	}
-	return filepath.Join(d.RootDir, filepath.FromSlash(relative))
-}
-
-func emptyChangeSet() *ChangeSet {
-	return &ChangeSet{
-		Added:     make([]string, 0),
-		Modified:  make([]string, 0),
-		Deleted:   make([]string, 0),
-		Unchanged: make([]string, 0),
-	}
-}
-
-func sortChangeSet(changeSet *ChangeSet) {
+	// Deterministic sorting
 	sort.Strings(changeSet.Added)
 	sort.Strings(changeSet.Modified)
 	sort.Strings(changeSet.Deleted)
 	sort.Strings(changeSet.Unchanged)
+
+	return changeSet, nil
 }
