@@ -146,12 +146,9 @@ func resolveCrossFileParentIDs(chunks []CodeChunk) error {
 		dir := filepath.ToSlash(filepath.Dir(chunks[i].SourceFile))
 		parentID, ok := structIDsByDir[dir][chunks[i].ParentName]
 		if !ok {
-			return fmt.Errorf(
-				"struct %q not found in package directory %q for method %q",
-				chunks[i].ParentName,
-				dir,
-				chunks[i].Name,
-			)
+			// Gracefully decouple parent when struct is moved, renamed, or uncommitted
+			chunks[i].ParentID = 0
+			continue
 		}
 		chunks[i].ParentID = parentID
 	}

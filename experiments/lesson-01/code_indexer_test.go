@@ -80,3 +80,23 @@ func (s *Service) TestOnly() {}`,
 		t.Error("test file was indexed")
 	}
 }
+
+func TestCrossFileMethodGracefulDegradation(t *testing.T) {
+	chunks := []CodeChunk{
+		{
+			ID:         1,
+			SourceFile: "service.go",
+			Kind:       ChunkKindMethod,
+			Name:       "OrphanMethod",
+			ParentName: "DeletedStruct",
+			ParentID:   0,
+		},
+	}
+	err := resolveCrossFileParentIDs(chunks)
+	if err != nil {
+		t.Fatalf("expected resolveCrossFileParentIDs to succeed gracefully, got: %v", err)
+	}
+	if chunks[0].ParentID != 0 {
+		t.Errorf("expected ParentID = 0 for missing struct, got %d", chunks[0].ParentID)
+	}
+}
