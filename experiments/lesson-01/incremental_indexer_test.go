@@ -17,7 +17,9 @@ func (e *testEmbedderWithTracking) Embed(text string) ([]float64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.calls = append(e.calls, text)
-	return make([]float64, 4096), nil
+	vec := make([]float64, 4096)
+	vec[0] = 1.0
+	return vec, nil
 }
 
 func (e *testEmbedderWithTracking) callCount() int {
