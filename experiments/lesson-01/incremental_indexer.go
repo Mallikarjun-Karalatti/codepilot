@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -171,7 +172,7 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		return toProcess[i].Path < toProcess[j].Path
 	})
 
-	// 1. Concurrent AST Parsing with bounded worker pool
+	// 1. Concurrent AST Parsing with bounded worker pool and atomic index dispatch
 	parseStart := time.Now()
 	parsedFiles := make([]parsedSourceFile, len(toProcess))
 	if len(toProcess) > 0 {
@@ -179,12 +180,11 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		if parseWorkers > len(toProcess) {
 			parseWorkers = len(toProcess)
 		}
-		taskCh := make(chan int, len(toProcess))
-		for i := range toProcess {
-			taskCh <- i
-		}
-		close(taskCh)
 
+		parseCtx, cancelParse := context.WithCancel(ctx)
+		defer cancelParse()
+
+		var nextParseIdx int64
 		var parseErr error
 		var parseOnce sync.Once
 		var parseWg sync.WaitGroup
@@ -193,9 +193,9 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 			parseWg.Add(1)
 			go func() {
 				defer parseWg.Done()
-				for i := range taskCh {
-					if ctx.Err() != nil {
-						parseOnce.Do(func() { parseErr = ctx.Err() })
+				for {
+					i := int(atomic.AddInt64(&nextParseIdx, 1) - 1)
+					if i >= len(toProcess) || parseCtx.Err() != nil {
 						return
 					}
 					snap := toProcess[i]
@@ -205,13 +205,19 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 						if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
 							continue
 						}
-						parseOnce.Do(func() { parseErr = fmt.Errorf("read %q: %w", snap.Path, err) })
+						parseOnce.Do(func() {
+							parseErr = fmt.Errorf("read %q: %w", snap.Path, err)
+							cancelParse()
+						})
 						return
 					}
 					source := string(sourceBytes)
 					file, err := parser.ParseFile(token.NewFileSet(), snap.Path, source, 0)
 					if err != nil {
-						parseOnce.Do(func() { parseErr = fmt.Errorf("parse %q: %w", snap.Path, err) })
+						parseOnce.Do(func() {
+							parseErr = fmt.Errorf("parse %q: %w", snap.Path, err)
+							cancelParse()
+						})
 						return
 					}
 					dir := filepath.ToSlash(filepath.Dir(snap.Path))
@@ -243,6 +249,9 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		parseWg.Wait()
 		if parseErr != nil {
 			return nil, parseErr
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
 	metrics.ParseDuration = time.Since(parseStart)
@@ -304,12 +313,11 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		if embedWorkers > len(tasks) {
 			embedWorkers = len(tasks)
 		}
-		embedCh := make(chan int, len(tasks))
-		for i := range tasks {
-			embedCh <- i
-		}
-		close(embedCh)
 
+		embedCtx, cancelEmbed := context.WithCancel(ctx)
+		defer cancelEmbed()
+
+		var nextEmbedIdx int64
 		var embedErr error
 		var embedOnce sync.Once
 		var embedWg sync.WaitGroup
@@ -318,9 +326,9 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 			embedWg.Add(1)
 			go func() {
 				defer embedWg.Done()
-				for i := range embedCh {
-					if ctx.Err() != nil {
-						embedOnce.Do(func() { embedErr = ctx.Err() })
+				for {
+					i := int(atomic.AddInt64(&nextEmbedIdx, 1) - 1)
+					if i >= len(tasks) || embedCtx.Err() != nil {
 						return
 					}
 					task := tasks[i]
@@ -328,6 +336,7 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 					if err != nil {
 						embedOnce.Do(func() {
 							embedErr = fmt.Errorf("embed chunk %s in %q: %w", task.chunk.Name, task.path, err)
+							cancelEmbed()
 						})
 						return
 					}
@@ -338,6 +347,7 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 								len(embedding),
 								idx.Config.EmbeddingDimension,
 							)
+							cancelEmbed()
 						})
 						return
 					}
@@ -348,6 +358,9 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		embedWg.Wait()
 		if embedErr != nil {
 			return nil, embedErr
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		stats.ChunksEmbedded = len(tasks)
 	}

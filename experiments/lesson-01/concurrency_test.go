@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,5 +220,40 @@ func TestConcurrentEmbeddingPropagatesWorkerError(t *testing.T) {
 	_, err := indexer.Index(ctx, rootDir)
 	if err == nil {
 		t.Fatal("expected error from failing embedder, got nil")
+	}
+}
+
+func TestConcurrentParsingEarlyWorkerCancellation(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+
+	for i := 1; i <= 8; i++ {
+		path := filepath.Join(rootDir, fmt.Sprintf("file_%02d.go", i))
+		content := fmt.Sprintf("package main\n\nfunc Valid%02d() {}\n", i)
+		if i == 3 {
+			// Deliberate syntax error to fail parsing
+			content = "package main\n\nfunc Broken("
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write file error: %v", err)
+		}
+	}
+
+	store, _ := NewFilesystemIndexStore(t.TempDir())
+	config := DefaultIndexConfig()
+	config.ParseWorkers = 4
+
+	indexer := &IncrementalIndexer{
+		Config:   config,
+		Embedder: &testEmbedderWithTracking{},
+		Store:    store,
+	}
+
+	_, err := indexer.Index(ctx, rootDir)
+	if err == nil {
+		t.Fatal("expected error from syntax error in file_03.go, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("expected parse error, got: %v", err)
 	}
 }
