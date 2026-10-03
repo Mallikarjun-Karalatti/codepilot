@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 )
 
 const (
@@ -17,12 +19,14 @@ const (
 
 // IndexConfig is the indexing configuration encoded by IndexConfigFingerprint.
 type IndexConfig struct {
-	SchemaVersion      int
-	ChunkerVersion     string
-	EmbeddingModel     string
-	EmbeddingDimension int
-	IncludeTests       bool
+	SchemaVersion       int
+	ChunkerVersion      string
+	EmbeddingModel      string
+	EmbeddingDimension  int
+	IncludeTests        bool
 	ExcludedDirectories []string
+	EmbedWorkers        int // Concurrency level for embedding (defaults to 4)
+	ParseWorkers        int // Concurrency level for AST parsing (defaults to runtime.NumCPU())
 }
 
 func DefaultIndexConfig() IndexConfig {
@@ -33,9 +37,34 @@ func DefaultIndexConfig() IndexConfig {
 		EmbeddingDimension:  4096,
 		IncludeTests:        false,
 		ExcludedDirectories: []string{".git", "vendor"},
+		EmbedWorkers:        4,
+		ParseWorkers:        runtime.NumCPU(),
 	}
 }
 
+// EffectiveEmbedWorkers returns a validated, positive concurrency limit for embeddings.
+func (c IndexConfig) EffectiveEmbedWorkers() int {
+	if c.EmbedWorkers <= 0 {
+		return 4
+	}
+	return c.EmbedWorkers
+}
+
+// EffectiveParseWorkers returns a validated, positive concurrency limit for AST parsing.
+func (c IndexConfig) EffectiveParseWorkers() int {
+	if c.ParseWorkers <= 0 {
+		workers := runtime.NumCPU()
+		if workers <= 0 {
+			return 1
+		}
+		return workers
+	}
+	return c.ParseWorkers
+}
+
+// Fingerprint generates a deterministic hash representing index compatibility.
+// Operational concurrency fields (EmbedWorkers, ParseWorkers) are intentionally
+// excluded so changing worker counts never invalidates existing indices.
 func (c IndexConfig) Fingerprint() (string, error) {
 	excluded := c.normalizedExcluded()
 	chunker := c.ChunkerVersion
@@ -64,24 +93,9 @@ func (c IndexConfig) Fingerprint() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal index config fingerprint: %w", err)
 	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
-}
 
-func (c IndexConfig) normalizedExcluded() []string {
-	seen := map[string]struct{}{".git": {}}
-	for _, dir := range c.ExcludedDirectories {
-		if dir == "" {
-			continue
-		}
-		seen[dir] = struct{}{}
-	}
-	out := make([]string, 0, len(seen))
-	for dir := range seen {
-		out = append(out, dir)
-	}
-	sort.Strings(out)
-	return out
+	hash := sha256.Sum256(payload)
+	return hex.EncodeToString(hash[:]), nil
 }
 
 func (c IndexConfig) scannerOptions() ScannerOptions {
@@ -112,4 +126,24 @@ func DefaultCodePilotCacheDir() (string, error) {
 		return "", fmt.Errorf("user cache dir: %w", err)
 	}
 	return filepath.Join(cache, "codepilot"), nil
+}
+
+func (c IndexConfig) normalizedExcluded() []string {
+	seen := make(map[string]struct{}, len(c.ExcludedDirectories)+1)
+	for _, dir := range c.ExcludedDirectories {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(dir)))
+		clean = strings.TrimPrefix(clean, "./")
+		clean = strings.Trim(clean, "/")
+		if clean != "" {
+			seen[clean] = struct{}{}
+		}
+	}
+	seen[".git"] = struct{}{}
+
+	result := make([]string, 0, len(seen))
+	for dir := range seen {
+		result = append(result, dir)
+	}
+	sort.Strings(result)
+	return result
 }

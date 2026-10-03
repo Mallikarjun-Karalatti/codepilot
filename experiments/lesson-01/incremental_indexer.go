@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,7 @@ type IndexedRepository struct {
 	Graph    *CodeRelationshipGraph
 	Lexical  *LexicalIndex
 	Stats    IndexStats
+	Metrics  IndexMetrics
 }
 
 // IncrementalIndexer updates a persisted index using ChangeSet classification.
@@ -45,9 +47,20 @@ type IncrementalIndexer struct {
 	Scanner  *RepositoryScanner
 	Hasher   FileHasher
 	Store    IndexStore
+	Logger   StructuredLogger
+}
+
+type parsedSourceFile struct {
+	name        string
+	dir         string
+	source      string
+	structNames []string
 }
 
 func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*IndexedRepository, error) {
+	totalStart := time.Now()
+	metrics := IndexMetrics{StartTime: totalStart}
+
 	if idx == nil {
 		return nil, fmt.Errorf("incremental indexer must not be nil")
 	}
@@ -89,10 +102,12 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		return nil, fmt.Errorf("load persisted index: %w", err)
 	}
 
+	scanStart := time.Now()
 	snapshots, err := scanner.Scan(ctx, cleanRoot)
 	if err != nil {
 		return nil, err
 	}
+	metrics.ScanDuration = time.Since(scanStart)
 
 	var prevManifest *RepositoryManifest
 	if prev != nil {
@@ -143,72 +158,204 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 	}
 
 	structNamesByDir := structNamesFromDocuments(keptByFile)
-	pending := make([]codeSourceFile, 0, len(reprocess))
 	snapshotByPath := make(map[string]FileSnapshot, len(snapshots))
+
+	var toProcess []FileSnapshot
 	for _, snap := range snapshots {
 		snapshotByPath[snap.Path] = snap
-		if !reprocess[snap.Path] {
+		if reprocess[snap.Path] {
+			toProcess = append(toProcess, snap)
+		}
+	}
+	sort.Slice(toProcess, func(i, j int) bool {
+		return toProcess[i].Path < toProcess[j].Path
+	})
+
+	// 1. Concurrent AST Parsing with bounded worker pool
+	parseStart := time.Now()
+	parsedFiles := make([]parsedSourceFile, len(toProcess))
+	if len(toProcess) > 0 {
+		parseWorkers := idx.Config.EffectiveParseWorkers()
+		if parseWorkers > len(toProcess) {
+			parseWorkers = len(toProcess)
+		}
+		taskCh := make(chan int, len(toProcess))
+		for i := range toProcess {
+			taskCh <- i
+		}
+		close(taskCh)
+
+		var parseErr error
+		var parseOnce sync.Once
+		var parseWg sync.WaitGroup
+
+		for w := 0; w < parseWorkers; w++ {
+			parseWg.Add(1)
+			go func() {
+				defer parseWg.Done()
+				for i := range taskCh {
+					if ctx.Err() != nil {
+						parseOnce.Do(func() { parseErr = ctx.Err() })
+						return
+					}
+					snap := toProcess[i]
+					fullPath := filepath.Join(cleanRoot, filepath.FromSlash(snap.Path))
+					sourceBytes, err := os.ReadFile(fullPath)
+					if err != nil {
+						if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+							continue
+						}
+						parseOnce.Do(func() { parseErr = fmt.Errorf("read %q: %w", snap.Path, err) })
+						return
+					}
+					source := string(sourceBytes)
+					file, err := parser.ParseFile(token.NewFileSet(), snap.Path, source, 0)
+					if err != nil {
+						parseOnce.Do(func() { parseErr = fmt.Errorf("parse %q: %w", snap.Path, err) })
+						return
+					}
+					dir := filepath.ToSlash(filepath.Dir(snap.Path))
+					var structs []string
+					for _, decl := range file.Decls {
+						genDecl, ok := decl.(*ast.GenDecl)
+						if !ok || genDecl.Tok != token.TYPE {
+							continue
+						}
+						for _, spec := range genDecl.Specs {
+							typeSpec, ok := spec.(*ast.TypeSpec)
+							if !ok {
+								continue
+							}
+							if _, ok := typeSpec.Type.(*ast.StructType); ok {
+								structs = append(structs, typeSpec.Name.Name)
+							}
+						}
+					}
+					parsedFiles[i] = parsedSourceFile{
+						name:        snap.Path,
+						dir:         dir,
+						source:      source,
+						structNames: structs,
+					}
+				}
+			}()
+		}
+		parseWg.Wait()
+		if parseErr != nil {
+			return nil, parseErr
+		}
+	}
+	metrics.ParseDuration = time.Since(parseStart)
+
+	// Combine extracted struct names deterministically
+	for _, p := range parsedFiles {
+		if p.name == "" {
 			continue
 		}
-		fullPath := filepath.Join(cleanRoot, filepath.FromSlash(snap.Path))
-		sourceBytes, err := os.ReadFile(fullPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
-				continue
-			}
-			return nil, fmt.Errorf("read %q: %w", snap.Path, err)
+		if structNamesByDir[p.dir] == nil {
+			structNamesByDir[p.dir] = make(map[string]struct{})
 		}
-		source := string(sourceBytes)
-		file, err := parser.ParseFile(token.NewFileSet(), snap.Path, source, 0)
-		if err != nil {
-			return nil, fmt.Errorf("parse %q: %w", snap.Path, err)
+		for _, name := range p.structNames {
+			structNamesByDir[p.dir][name] = struct{}{}
 		}
-		dir := filepath.ToSlash(filepath.Dir(snap.Path))
-		if structNamesByDir[dir] == nil {
-			structNamesByDir[dir] = make(map[string]struct{})
-		}
-		for _, decl := range file.Decls {
-			genDecl, ok := decl.(*ast.GenDecl)
-			if !ok || genDecl.Tok != token.TYPE {
-				continue
-			}
-			for _, spec := range genDecl.Specs {
-				typeSpec, ok := spec.(*ast.TypeSpec)
-				if !ok {
-					continue
-				}
-				if _, ok := typeSpec.Type.(*ast.StructType); ok {
-					structNamesByDir[dir][typeSpec.Name.Name] = struct{}{}
-				}
-			}
-		}
-		pending = append(pending, codeSourceFile{name: snap.Path, dir: dir, source: source})
 		stats.FilesParsed++
 	}
 
-	newByFile := make(map[string][]CodeDocument, len(pending))
-	for _, file := range pending {
-		fileChunks, err := chunker.chunk(file.name, file.source, structNamesByDir[file.dir])
+	// 2. Chunking
+	chunkStart := time.Now()
+	type fileChunksPair struct {
+		path   string
+		chunks []CodeChunk
+	}
+	var fileChunksList []fileChunksPair
+	for _, p := range parsedFiles {
+		if p.name == "" {
+			continue
+		}
+		chunks, err := chunker.chunk(p.name, p.source, structNamesByDir[p.dir])
 		if err != nil {
-			return nil, fmt.Errorf("chunk %q: %w", file.name, err)
+			return nil, fmt.Errorf("chunk %q: %w", p.name, err)
 		}
-		docs := make([]CodeDocument, 0, len(fileChunks))
-		for _, chunk := range fileChunks {
-			embedding, err := idx.Embedder.Embed(chunk.Text)
-			if err != nil {
-				return nil, fmt.Errorf("embed chunk %s in %q: %w", chunk.Name, file.name, err)
-			}
-			if idx.Config.EmbeddingDimension > 0 && len(embedding) != idx.Config.EmbeddingDimension {
-				return nil, fmt.Errorf(
-					"embedding dimension %d does not match configured %d",
-					len(embedding),
-					idx.Config.EmbeddingDimension,
-				)
-			}
-			docs = append(docs, CodeDocument{Chunk: chunk, Embedding: embedding})
-			stats.ChunksEmbedded++
+		fileChunksList = append(fileChunksList, fileChunksPair{path: p.name, chunks: chunks})
+	}
+	metrics.ChunkDuration = time.Since(chunkStart)
+
+	// 3. Concurrent Chunk Embedding with bounded worker pool
+	embedStart := time.Now()
+	type embedTask struct {
+		path     string
+		chunk    CodeChunk
+		outIndex int
+	}
+	var tasks []embedTask
+	for _, pair := range fileChunksList {
+		for _, chunk := range pair.chunks {
+			tasks = append(tasks, embedTask{
+				path:     pair.path,
+				chunk:    chunk,
+				outIndex: len(tasks),
+			})
 		}
-		newByFile[file.name] = docs
+	}
+
+	embeddedDocs := make([]CodeDocument, len(tasks))
+	if len(tasks) > 0 {
+		embedWorkers := idx.Config.EffectiveEmbedWorkers()
+		if embedWorkers > len(tasks) {
+			embedWorkers = len(tasks)
+		}
+		embedCh := make(chan int, len(tasks))
+		for i := range tasks {
+			embedCh <- i
+		}
+		close(embedCh)
+
+		var embedErr error
+		var embedOnce sync.Once
+		var embedWg sync.WaitGroup
+
+		for w := 0; w < embedWorkers; w++ {
+			embedWg.Add(1)
+			go func() {
+				defer embedWg.Done()
+				for i := range embedCh {
+					if ctx.Err() != nil {
+						embedOnce.Do(func() { embedErr = ctx.Err() })
+						return
+					}
+					task := tasks[i]
+					embedding, err := idx.Embedder.Embed(task.chunk.Text)
+					if err != nil {
+						embedOnce.Do(func() {
+							embedErr = fmt.Errorf("embed chunk %s in %q: %w", task.chunk.Name, task.path, err)
+						})
+						return
+					}
+					if idx.Config.EmbeddingDimension > 0 && len(embedding) != idx.Config.EmbeddingDimension {
+						embedOnce.Do(func() {
+							embedErr = fmt.Errorf(
+								"embedding dimension %d does not match configured %d",
+								len(embedding),
+								idx.Config.EmbeddingDimension,
+							)
+						})
+						return
+					}
+					embeddedDocs[task.outIndex] = CodeDocument{Chunk: task.chunk, Embedding: embedding}
+				}
+			}()
+		}
+		embedWg.Wait()
+		if embedErr != nil {
+			return nil, embedErr
+		}
+		stats.ChunksEmbedded = len(tasks)
+	}
+	metrics.EmbedDuration = time.Since(embedStart)
+
+	newByFile := make(map[string][]CodeDocument, len(fileChunksList))
+	for _, doc := range embeddedDocs {
+		newByFile[doc.Chunk.SourceFile] = append(newByFile[doc.Chunk.SourceFile], doc)
 	}
 
 	byFile := make(map[string][]CodeDocument)
@@ -268,15 +415,45 @@ func (idx *IncrementalIndexer) Index(ctx context.Context, root string) (*Indexed
 		Files:                  files,
 	}
 
+	persistStart := time.Now()
 	state := &PersistedIndex{Manifest: manifest, Documents: documents}
 	if err := idx.Store.Commit(ctx, repoID, state); err != nil {
 		return nil, fmt.Errorf("commit index: %w", err)
 	}
+	metrics.PersistDuration = time.Since(persistStart)
+	metrics.TotalDuration = time.Since(totalStart)
 
-	return idx.materialize(cleanRoot, manifest, documents, stats)
+	metrics.FilesScanned = stats.FilesScanned
+	metrics.FilesAdded = stats.FilesAdded
+	metrics.FilesModified = stats.FilesModified
+	metrics.FilesDeleted = stats.FilesDeleted
+	metrics.FilesUnchanged = stats.FilesUnchanged
+	metrics.FilesParsed = stats.FilesParsed
+	metrics.ChunksEmbedded = stats.ChunksEmbedded
+	metrics.ChunksKept = stats.ChunksKept
+	metrics.ChunksTotal = len(documents)
+	metrics.FullReindex = stats.FullReindex
+
+	if idx.Logger != nil {
+		idx.Logger.Log("index_completed", map[string]any{
+			"repository_id":   repoID,
+			"files_scanned":   metrics.FilesScanned,
+			"files_added":     metrics.FilesAdded,
+			"files_modified":  metrics.FilesModified,
+			"files_deleted":   metrics.FilesDeleted,
+			"files_unchanged": metrics.FilesUnchanged,
+			"chunks_embedded": metrics.ChunksEmbedded,
+			"chunks_kept":     metrics.ChunksKept,
+			"chunks_total":    metrics.ChunksTotal,
+			"duration_ms":     metrics.TotalDuration.Milliseconds(),
+		})
+	}
+
+	return idx.materialize(cleanRoot, manifest, documents, stats, metrics)
 }
 
 func (idx *IncrementalIndexer) Load(ctx context.Context, root string) (*IndexedRepository, error) {
+	loadStart := time.Now()
 	if idx == nil {
 		return nil, fmt.Errorf("incremental indexer must not be nil")
 	}
@@ -300,7 +477,14 @@ func (idx *IncrementalIndexer) Load(ctx context.Context, root string) (*IndexedR
 		return nil, fmt.Errorf("no persisted index for repository %q", cleanRoot)
 	}
 	stats := IndexStats{FilesUnchanged: len(state.Manifest.Files), ChunksKept: len(state.Documents)}
-	return idx.materialize(cleanRoot, state.Manifest, state.Documents, stats)
+	metrics := IndexMetrics{
+		StartTime:      loadStart,
+		TotalDuration:  time.Since(loadStart),
+		FilesUnchanged: len(state.Manifest.Files),
+		ChunksKept:     len(state.Documents),
+		ChunksTotal:    len(state.Documents),
+	}
+	return idx.materialize(cleanRoot, state.Manifest, state.Documents, stats, metrics)
 }
 
 func (idx *IncrementalIndexer) materialize(
@@ -308,6 +492,7 @@ func (idx *IncrementalIndexer) materialize(
 	manifest RepositoryManifest,
 	documents []CodeDocument,
 	stats IndexStats,
+	metrics IndexMetrics,
 ) (*IndexedRepository, error) {
 	chunks := make([]CodeChunk, len(documents))
 	for i, doc := range documents {
@@ -330,6 +515,7 @@ func (idx *IncrementalIndexer) materialize(
 		Graph:    graph,
 		Lexical:  lexical,
 		Stats:    stats,
+		Metrics:  metrics,
 	}, nil
 }
 

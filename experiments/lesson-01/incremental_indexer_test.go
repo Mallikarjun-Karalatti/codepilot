@@ -4,16 +4,32 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
 type testEmbedderWithTracking struct {
+	mu    sync.Mutex
 	calls []string
 }
 
 func (e *testEmbedderWithTracking) Embed(text string) ([]float64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.calls = append(e.calls, text)
 	return make([]float64, 4096), nil
+}
+
+func (e *testEmbedderWithTracking) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.calls)
+}
+
+func (e *testEmbedderWithTracking) reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls = nil
 }
 
 func TestIncrementalIndexerLifecycle(t *testing.T) {
@@ -70,7 +86,7 @@ func TestIncrementalIndexerLifecycle(t *testing.T) {
 
 	// 2. Zero-Work Run (No changes)
 	t.Run("immediate re-index performs zero embeddings", func(t *testing.T) {
-		embedder.calls = nil // reset counter
+		embedder.reset() // reset counter
 		indexed, err := indexer.Index(ctx, rootDir)
 		if err != nil {
 			t.Fatalf("Index() error = %v", err)
@@ -85,14 +101,14 @@ func TestIncrementalIndexerLifecycle(t *testing.T) {
 		if indexed.Stats.ChunksKept != 2 {
 			t.Errorf("ChunksKept = %d, want 2", indexed.Stats.ChunksKept)
 		}
-		if len(embedder.calls) != 0 {
-			t.Errorf("Embed() called %d times, want 0", len(embedder.calls))
+		if embedder.callCount() != 0 {
+			t.Errorf("Embed() called %d times, want 0", embedder.callCount())
 		}
 	})
 
 	// 3. Modify One File
 	t.Run("modify one file re-embeds only that file", func(t *testing.T) {
-		embedder.calls = nil
+		embedder.reset()
 		newContent := "package main\n\nfunc Authenticate() bool { return false }\nfunc NewHelper() {}\n"
 		if err := os.WriteFile(file1, []byte(newContent), 0o600); err != nil {
 			t.Fatalf("failed to update auth.go: %v", err)
@@ -119,7 +135,7 @@ func TestIncrementalIndexerLifecycle(t *testing.T) {
 
 	// 4. Delete One File
 	t.Run("delete one file removes its chunks", func(t *testing.T) {
-		embedder.calls = nil
+		embedder.reset()
 		if err := os.Remove(file1); err != nil {
 			t.Fatalf("failed to remove auth.go: %v", err)
 		}
@@ -145,7 +161,7 @@ func TestIncrementalIndexerLifecycle(t *testing.T) {
 
 	// 5. Config Change Triggers Full Re-index
 	t.Run("changing config fingerprint triggers clean full re-index", func(t *testing.T) {
-		embedder.calls = nil
+		embedder.reset()
 		newConfig := DefaultIndexConfig()
 		newConfig.EmbeddingModel = "qwen-next-gen" // changes fingerprint
 
