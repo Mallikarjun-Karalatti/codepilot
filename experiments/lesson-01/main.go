@@ -842,7 +842,9 @@ func (c *CodeChunker) chunk(
 
 		parentID, ok := structIDs[chunks[i].ParentName]
 		if !ok {
-			if _, known := knownStructNames[chunks[i].ParentName]; known {
+			if knownStructNames != nil {
+				// During multi-file repository indexing, if receiver type is a custom slice,
+				// type alias, or decoupled, gracefully leave ParentID = 0.
 				continue
 			}
 			return nil, fmt.Errorf(

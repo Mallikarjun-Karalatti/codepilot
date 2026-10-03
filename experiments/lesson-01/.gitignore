@@ -3,3 +3,4 @@ lesson-01
 codepilot
 *.bin
 *.exe
+node_modules/
