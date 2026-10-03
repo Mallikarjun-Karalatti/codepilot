@@ -96,16 +96,38 @@ type EvidenceRetriever interface {
 
 // StandardBenchmarkDataset returns the canonical 30-query retrieval benchmark dataset.
 func StandardBenchmarkDataset() []BenchmarkQuery {
-	cases := retrievalBenchmarkCases()
-	out := make([]BenchmarkQuery, len(cases))
-	for i, c := range cases {
-		out[i] = BenchmarkQuery{
-			Category:      c.Category,
-			Question:      c.Question,
-			ExpectedNames: c.ExpectedNames,
-		}
+	return []BenchmarkQuery{
+		{Category: "exact identifier", Question: "Where is AuthenticateUser defined?", ExpectedNames: []string{"AuthenticateUser"}},
+		{Category: "exact identifier", Question: "FindUser", ExpectedNames: []string{"FindUser"}},
+		{Category: "exact identifier", Question: "UpdateUserEmail", ExpectedNames: []string{"UpdateUserEmail"}},
+		{Category: "exact identifier", Question: "What does NormalizeToken do?", ExpectedNames: []string{"NormalizeToken"}},
+		{Category: "natural language", Question: "Where is authentication handled?", ExpectedNames: []string{"AuthenticateUser"}},
+		{Category: "natural language", Question: "How does authentication work?", ExpectedNames: []string{"AuthenticateUser", "ValidateToken"}},
+		{Category: "natural language", Question: "Where is a user's email updated?", ExpectedNames: []string{"UpdateEmail", "UpdateUserEmail"}},
+		{Category: "natural language", Question: "How does the application find a user?", ExpectedNames: []string{"GetUser", "FindUser"}},
+		{Category: "natural language", Question: "How is whitespace removed from a token?", ExpectedNames: []string{"NormalizeToken"}},
+		{Category: "conceptual", Question: "What prevents revoked tokens from authenticating?", ExpectedNames: []string{"ValidateToken", "AuthenticateUser"}},
+		{Category: "conceptual", Question: "How are a user's active sessions invalidated?", ExpectedNames: []string{"LogoutUser", "RevokeSession"}},
+		{Category: "conceptual", Question: "How does the code determine whether an account is active?", ExpectedNames: []string{"IsUserActive", "FindUser"}},
+		{Category: "conceptual", Question: "How is an email change persisted?", ExpectedNames: []string{"UpdateEmail", "UpdateUserEmail"}},
+		{Category: "cross-file", Question: "Where is database-backed token validation called?", ExpectedNames: []string{"AuthenticateUser", "ValidateToken"}},
+		{Category: "cross-file", Question: "Which service loads a user record from the database?", ExpectedNames: []string{"GetUser", "FindUser"}},
+		{Category: "cross-file", Question: "Where does the service delegate an email write?", ExpectedNames: []string{"UpdateEmail", "UpdateUserEmail"}},
+		{Category: "parent-child", Question: "Which AuthService methods handle login and logout?", ExpectedNames: []string{"AuthService", "AuthenticateUser", "LogoutUser"}},
+		{Category: "parent-child", Question: "What methods are provided by UserService?", ExpectedNames: []string{"UserService", "GetUser", "UpdateEmail"}},
+		{Category: "parent-child", Question: "Which Database methods work with tokens and sessions?", ExpectedNames: []string{"Database", "ValidateToken", "RevokeSession"}},
+		{Category: "multi-chunk", Question: "What code runs during sign-in and where is the token checked?", ExpectedNames: []string{"AuthenticateUser", "ValidateToken"}},
+		{Category: "multi-chunk", Question: "Where is a user fetched and what data shape is returned?", ExpectedNames: []string{"GetUser", "FindUser", "User"}},
+		{Category: "multi-chunk", Question: "Which operations participate in changing a user's email?", ExpectedNames: []string{"UpdateEmail", "UpdateUserEmail"}},
+		{Category: "vocabulary mismatch", Question: "How does login reject a credential that has been revoked?", ExpectedNames: []string{"AuthenticateUser", "ValidateToken"}},
+		{Category: "vocabulary mismatch", Question: "How can an account be looked up using its numeric key?", ExpectedNames: []string{"GetUser", "FindUser", "User"}},
+		{Category: "ambiguous", Question: "Where is the user?", ExpectedNames: []string{"GetUser", "FindUser"}},
+		{Category: "negative", Question: "Where are password reset emails sent?"},
+		{Category: "negative", Question: "Where are password hashes verified?"},
+		{Category: "negative", Question: "Which function sends an email to the user?"},
+		{Category: "negative", Question: "Where is the JWT signature verified?"},
+		{Category: "negative", Question: "Which method deletes a user account?"},
 	}
-	return out
 }
 
 // EvaluateRetriever runs the full benchmark suite against any EvidenceRetriever.
