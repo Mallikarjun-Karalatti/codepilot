@@ -50,14 +50,21 @@ func (c IndexConfig) EffectiveEmbedWorkers() int {
 	return c.EmbedWorkers
 }
 
-// EffectiveParseWorkers returns a validated, positive concurrency limit for AST parsing.
+// EffectiveParseWorkers returns a validated, positive concurrency limit for AST parsing,
+// bounded to 16 to avoid saturating OS file descriptor limits.
 func (c IndexConfig) EffectiveParseWorkers() int {
 	if c.ParseWorkers <= 0 {
 		workers := runtime.NumCPU()
 		if workers <= 0 {
-			return 1
+			workers = 1
+		}
+		if workers > 16 {
+			workers = 16
 		}
 		return workers
+	}
+	if c.ParseWorkers > 16 {
+		return 16
 	}
 	return c.ParseWorkers
 }
