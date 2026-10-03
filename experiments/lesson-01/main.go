@@ -96,8 +96,8 @@ func NewLLMClient(baseURL string, model string) *LLMClient {
 	}
 }
 
+// NewEmbeddingClient initializes an HTTP client targeting Ollama's /api/embed endpoint.
 func NewEmbeddingClient(baseURL string, model string) *EmbeddingClient {
-	// your implementation
 	return &EmbeddingClient{
 		BaseURL: baseURL,
 		Model:   model,
