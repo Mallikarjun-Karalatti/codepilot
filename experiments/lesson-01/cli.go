@@ -22,22 +22,41 @@ func runCLI(ctx context.Context, args []string) error {
 		printUsage()
 		return nil
 	}
+
+	verbose := false
+	filteredArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--verbose" || arg == "-v" {
+			verbose = true
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	if len(filteredArgs) == 0 {
+		printUsage()
+		return nil
+	}
+	args = filteredArgs
+
 	switch args[0] {
+	case "help", "--help", "-h":
+		printUsage()
+		return nil
 	case "index":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: codepilot index <repository>")
+			return fmt.Errorf("usage: codepilot index [--verbose] <repository>")
 		}
-		return runIndex(ctx, args[1])
+		return runIndex(ctx, args[1], verbose)
 	case "ask":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: codepilot ask <repository> <question>")
 		}
-		return runAsk(ctx, args[1], strings.Join(args[2:], " "))
+		return runAsk(ctx, args[1], strings.Join(args[2:], " "), verbose)
 	case "agent":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: codepilot agent <repository> <goal>")
 		}
-		return runAgent(ctx, args[1], strings.Join(args[2:], " "))
+		return runAgent(ctx, args[1], strings.Join(args[2:], " "), verbose)
 	case "tool":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: codepilot tool <repository> <tool_name> [args_json]")
@@ -46,17 +65,17 @@ func runCLI(ctx context.Context, args []string) error {
 		if len(args) >= 4 {
 			argsJSON = strings.Join(args[3:], " ")
 		}
-		return runTool(ctx, args[1], args[2], argsJSON)
+		return runTool(ctx, args[1], args[2], argsJSON, verbose)
 	case "eval":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: codepilot eval <repository>")
 		}
-		return runEval(ctx, args[1])
+		return runEval(ctx, args[1], verbose)
 	case "mcp":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: codepilot mcp <repository>")
 		}
-		return runMCP(ctx, args[1])
+		return runMCP(ctx, args[1], verbose)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -67,7 +86,7 @@ func printUsage() {
 	fmt.Print(`CodePilot - AI-Powered Repository-Aware Software Engineering Assistant
 
 Usage:
-  codepilot index <repository>                 Incrementally index a repository
+  codepilot index [--verbose] <repository>     Incrementally index a repository
   codepilot ask <repository> <question>        Ask a source-grounded question
   codepilot agent <repository> <goal>          Run autonomous multi-step reasoning agent
   codepilot tool <repository> <name> [args]    Directly run a deterministic intelligence tool
@@ -77,22 +96,27 @@ Usage:
 `)
 }
 
-func newCLIIndexer(store IndexStore, config IndexConfig) *IncrementalIndexer {
+func newCLIIndexer(store IndexStore, config IndexConfig, verbose bool) *IncrementalIndexer {
+	var logger StructuredLogger
+	if verbose {
+		logger = NewJSONLogger(os.Stderr)
+	}
 	return &IncrementalIndexer{
 		Config:   config,
 		Embedder: NewEmbeddingClient("http://localhost:11434", config.EmbeddingModel),
 		Hasher:   &SHA256FileHasher{},
 		Store:    store,
 		Scanner:  &RepositoryScanner{Options: config.scannerOptions()},
+		Logger:   logger,
 	}
 }
 
-func runIndex(ctx context.Context, root string) error {
+func runIndex(ctx context.Context, root string, verbose bool) error {
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
-	indexer := newCLIIndexer(store, DefaultIndexConfig())
+	indexer := newCLIIndexer(store, DefaultIndexConfig(), verbose)
 	indexed, err := indexer.Index(ctx, root)
 	if err != nil {
 		return err
@@ -103,14 +127,14 @@ func runIndex(ctx context.Context, root string) error {
 	return nil
 }
 
-func runAsk(ctx context.Context, root, question string) error {
+func runAsk(ctx context.Context, root, question string, verbose bool) error {
 	_ = ctx
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
 	config := DefaultIndexConfig()
-	indexer := newCLIIndexer(store, config)
+	indexer := newCLIIndexer(store, config, verbose)
 	indexed, err := indexer.Load(context.Background(), root)
 	if err != nil {
 		return err
@@ -133,13 +157,13 @@ func runAsk(ctx context.Context, root, question string) error {
 	return nil
 }
 
-func runAgent(ctx context.Context, root, goal string) error {
+func runAgent(ctx context.Context, root, goal string, verbose bool) error {
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
 	config := DefaultIndexConfig()
-	indexer := newCLIIndexer(store, config)
+	indexer := newCLIIndexer(store, config, verbose)
 	indexed, err := indexer.Load(ctx, root)
 	if err != nil {
 		return err
@@ -173,14 +197,14 @@ func runAgent(ctx context.Context, root, goal string) error {
 	return nil
 }
 
-func runTool(ctx context.Context, root, toolName, argsJSON string) error {
+func runTool(ctx context.Context, root, toolName, argsJSON string, verbose bool) error {
 	_ = ctx
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
 	config := DefaultIndexConfig()
-	indexer := newCLIIndexer(store, config)
+	indexer := newCLIIndexer(store, config, verbose)
 	indexed, err := indexer.Load(context.Background(), root)
 	if err != nil {
 		return err
@@ -202,14 +226,14 @@ func runTool(ctx context.Context, root, toolName, argsJSON string) error {
 	return nil
 }
 
-func runEval(ctx context.Context, root string) error {
+func runEval(ctx context.Context, root string, verbose bool) error {
 	_ = ctx
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
 	config := DefaultIndexConfig()
-	indexer := newCLIIndexer(store, config)
+	indexer := newCLIIndexer(store, config, verbose)
 	indexed, err := indexer.Load(context.Background(), root)
 	if err != nil {
 		return err
@@ -244,13 +268,13 @@ func runEval(ctx context.Context, root string) error {
 	return nil
 }
 
-func runMCP(ctx context.Context, root string) error {
+func runMCP(ctx context.Context, root string, verbose bool) error {
 	store, err := NewFilesystemIndexStore("")
 	if err != nil {
 		return err
 	}
 	config := DefaultIndexConfig()
-	indexer := newCLIIndexer(store, config)
+	indexer := newCLIIndexer(store, config, verbose)
 	indexed, err := indexer.Load(ctx, root)
 	if err != nil {
 		return err

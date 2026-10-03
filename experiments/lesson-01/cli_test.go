@@ -40,4 +40,12 @@ func TestCLIDispatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for tool with no tool name, got nil")
 	}
+
+	// 4. Verbose flag with help
+	if err := runCLI(ctx, []string{"--verbose", "help"}); err != nil {
+		t.Fatalf("expected no error for --verbose help, got: %v", err)
+	}
+	if err := runCLI(ctx, []string{"-v", "-h"}); err != nil {
+		t.Fatalf("expected no error for -v -h, got: %v", err)
+	}
 }
