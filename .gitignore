@@ -1,0 +1,20 @@
+# Compiled binaries
+/bin/
+/codepilot
+/codepilot-server
+*.bin
+*.exe
+
+# OS & Editor
+.DS_Store
+__MACOSX/
+.idea/
+.vscode/
+
+# Web / Frontend
+web/node_modules/
+web/.vite/
+
+# Test temp dirs & coverage
+coverage.out
+/tmp/
